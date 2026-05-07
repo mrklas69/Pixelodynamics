@@ -4,16 +4,23 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 
 ## Fáze 2 — pixelová gravitace
 
-- [ ] Rozhodnout: centrální gravitace (k nule), párová gravitace (O(n²) GMm/r²), nebo k těžišti
-- [ ] Pokud párová → spatial grid pro O(n)
-- [ ] UI slider pro intenzitu
+- [x] Párová Newtonova gravitace s Plummer softeningem
+- [x] UI slider pro G; ε a substeps schované jako programové konstanty (`params.ts`)
+- [x] Manuální symplektický Eulerův integrátor (Rapier step() obejít) — zachovává ∑P a ∑L
+- [x] Substepping (4× per frame) pro nižší truncation error
+- [ ] Spatial grid (O(n) místo O(n²)) — spustit, až FPS klesne pod 50 při target N
+- [ ] Profilovat: jak vysoké N zvládne current naive O(n²) kód na PC vs. mobilu
+- [ ] Vizualizace centroidu jako křížek
 
 ## Fáze 3 — slepování
 
+- [ ] **Návrat k Rapier step()** — manuální integrátor + Rapier step pro joints/kolize. Hybrid přechod naplánovat.
 - [ ] Detekce „dotyku po straně" — collisionGroups zapnout, contact event
-- [ ] FixedJoint mezi sousedy
+- [ ] FixedJoint mezi sousedy (parametr `H` ze SETTINGS = stiffness)
 - [ ] Vizualizace vazeb (čára/barva)
 - [ ] Edge case: jeden pixel slepený se 2+ sousedy → struktura, ne řetězec
+- [ ] **Composite object dataset** (viz IDEAS.md) — `id, pixelIds, x, y, vx, vy, r, rs, m, I`. Update centroidu při změně topologie nebo per-tick.
+- [ ] Wire up Largest a Connections counters do STATS
 
 ## Fáze 4 — hmotnost a pružnost
 
@@ -26,6 +33,15 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [ ] Sledovat impulse na jointu
 - [ ] Threshold → joint.remove()
 - [ ] Test scénář: rotující slepenec se odstředivkou trhá
+
+## UI / Diagnostika
+
+- [x] STATS panel — Time, Pixels, Objects, Connections, ∑P, ∑L
+- [x] FACTS panel — Fastest, Spinniest, Most momentum, Most ang. mom., Most massive (klik = kamera)
+- [x] Home camera (návrat na 0,0)
+- [ ] Largest (Most-pixels-in-object) — až budou objekty
+- [ ] Connections counter — až budou jointy
+- [ ] Total energy E = KE + PE (validace integrátoru)
 
 ## Infrastruktura
 

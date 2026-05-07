@@ -6,7 +6,7 @@ Webová sandbox simulace dynamiky **pixelů** — malých čtvercových rigid bo
 
 - **Vite + TypeScript** (strict)
 - **Svelte 5** — UI panely, runes API
-- **Rapier 2D** (`@dimforge/rapier2d-compat`) — rigid body fyzika přes WASM
+- **Rapier 2D** (`@dimforge/rapier2d-compat`) — rigid body container; ve fázi 3+ přebírá joints a kolize
 - **WebGL2** — instanced quads pro tisíce rotujících pixelů
 - **gl-matrix** — 2D ortografická projekce
 - **GitHub Pages** — deploy z `main` přes GitHub Actions
@@ -16,7 +16,7 @@ Webová sandbox simulace dynamiky **pixelů** — malých čtvercových rigid bo
 | Fáze | Cíl | Stav |
 |---|---|---|
 | 1 — FVP | Ballistický pohyb + rotace, LMB spawn, kamera (WASD + zoom), bez interakcí | hotovo |
-| 2 | Pixelová gravitace (centrální nebo párová) | — |
+| 2 | Párová Newtonova gravitace, manuální symplektický Euler, STATS+FACTS UI | hotovo |
 | 3 | Slepování po straně přes `FixedJoint` | — |
 | 4 | Hmotnost a pružnost (distance/spring joints, density) | — |
 | 5 | Rozbití slepence při překročení impulse threshold | — |
