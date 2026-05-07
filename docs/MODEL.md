@@ -103,10 +103,14 @@ Per render tick (twice per second pro UI):
 |---|---|
 | `∑P` | `Σ mᵢ·vᵢ` (vektor → norm pro display) |
 | `∑L` (vůči těžišti) | `Σ mᵢ ((rᵢ - c) × vᵢ) + Σ Iᵢ ωᵢ` |
-| `KE` | `Σ ½ mᵢ |vᵢ|²` |
+| `KE` (translační + rotační) | `Σ ½ mᵢ \|vᵢ\|² + Σ ½ Iᵢ ωᵢ²` |
+| `PE` (gravitační) | `-Σᵢ<ⱼ G mᵢ mⱼ · W(rᵢⱼ) / √(rᵢⱼ² + ε²)` |
+| `∑E` | `KE + PE` (totální mechanická energie) |
 | `c` (těžiště) | `(Σ mᵢ rᵢ) / (Σ mᵢ)` |
 
-Spin člen `I·ω` se započítává — bez něj by manuální zachycení rotace pixelů (přiřazené při spawnu jako random `rs`) chybělo v rozpočtu úhlové hybnosti a `∑L` by drift falešně.
+Spin člen `I·ω` se započítává v `∑L` i v `KE` — bez něj by manuální zachycení rotace pixelů (přiřazené při spawnu jako `rs`, později generované kontaktním torquem ve fázi 3+) chybělo v rozpočtech úhlové hybnosti i energie a indikátory by driftovaly falešně.
+
+`∑E` je pro uzavřený konzervativní systém invariantní (`dE/dt = 0`). Symplektický Euler nezachovává `E` přesně, ale drift je *bounded oscillation* kolem true E s amplitudou O(Δt²) — neutíká k nekonečnu jako Euler/RK4. Δ∑E v STATS panelu = `E - E₀` (E₀ se zachytí při prvním display ticku po prvním sim kroku, kdy PE má platnou hodnotu z předchozí `stepGravity` call).
 
 ## Modes (fáze 3 prep)
 

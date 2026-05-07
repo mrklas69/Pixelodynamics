@@ -50,7 +50,7 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] Hover infotipy nad pixely (id, x, y, vx, vy, r, rs, m, |v|)
 - [ ] Largest (Most-pixels-in-object) — až budou objekty
 - [ ] Connections counter — až budou jointy
-- [~] Total energy E = KE + PE — sezení 5: PE přidána do `Modelshot.diagnostics` přes `lastPE` cache v App.svelte. Display v STATS panelu zatím chybí (přidat ∑E + drift indikátor).
+- [x] Total energy E = KE + PE — sezení 6: ∑E + Δ∑E v STATS panelu, E₀ se zachytí při prvním display ticku po prvním sim kroku (PE platná). KE rozšířena o rotační složku ½·I·ω² (I=m/6).
 - [ ] Vyhodnotit `GRAVITY_CUTOFF_FACTOR` — současných 5·ε je culling pro spread konfigurace. Pro fázi 6+ („rozprostřený plyn") zvážit 8-10·ε. Měřit perf vs. kvalita aproximace.
 
 ## Dokumentace
@@ -65,7 +65,7 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [ ] Touch / pinch zoom pro mobil
 - [ ] Adaptivní limit počtu pixelů podle FPS
 - [ ] Performance budget: target 60 FPS @ 1000 pixelů na desktopu — měřit po spatial grid validaci
-- [ ] Pages deploy verifikace (otevřená dluh ze sezení 1)
+- [x] Pages deploy verifikace — sezení 6: 5/5 deployů success, root + bundles HTTP 200, base path `/Pixelodynamics/` korektní. Live na https://mrklas69.github.io/Pixelodynamics/.
 
 ## Hotovo
 

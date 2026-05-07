@@ -1,5 +1,21 @@
 # DONE
 
+## 2026-05-07 — Sezení 6: Pages verifikace, ∑E + Δ∑E indikátor, rotační KE
+
+- **Pages deploy verifikován** — uzavření 5sezeňového stale dluhu ze sezení 1. Všech 5 GitHub Actions runs `success`, root + JS + CSS bundles HTTP 200, base path `/Pixelodynamics/` aplikovaný v `<script>`/`<link>`. Live na https://mrklas69.github.io/Pixelodynamics/. Žádné code změny nepotřeba.
+- **∑E + Δ∑E v STATS panelu** (`src/ui/App.svelte`):
+  - Nové `$state` proměnné `sumE`, `deltaE` + interní `e0: number | null`.
+  - V display ticku (každých 0.5 s): `E = ke + lastPE`, `e0` se zachytí jakmile `simTime > 0` (PE platná z předchozí `stepGravity` call), `Δ∑E = E - e0`.
+  - Reset v `resetScene` (a tedy i v `applyPreset`) → `e0 = null`, `sumE = 0`, `deltaE = 0`.
+  - Pro rapier mode (E1/E2 s G=0): `lastPE = 0` → ∑E = KE only, fyzicky správně.
+  - 2 nové řádky v STATS markup (∑E, Δ∑E) s jednotkou `kg·U²/t²`.
+- **Rotační KE** v `computeDiagnostics` (`src/sim/diagnostics.ts`) — přidán člen `Σ ½·Iᵢ·ωᵢ²` (I=m/6 pro pixel-čtverec). Pro současné presety s `rs=0` a bez kontaktů žádný měřitelný rozdíl, ale po fázi 3 (kolize → torque) by ∑E bez něj falešně driftovalo. Korektnost ne čekat na bug.
+- **MODEL.md** — diagnostika tabulka rozšířena o PE a ∑E rows, KE oprava na translační + rotační. Dopsán odstavec o symplektickém bounded driftu E a E₀ capture logice.
+- **Empirická validace E7g s novým indikátorem**:
+  - Modelshot: KE = 3.7339, PE = -6.4839, E(60) = -2.7499 — bit-shoda se sezením 5.
+  - STATS @ t=60s: `∑E = -2.75`, `Δ∑E = -1.195e-3` ≈ `-2e-5/s` drift rate. Záporný drift = symplektický Euler typicky drifuje směrem k vázanějšímu stavu, bounded oscillation.
+  - ∑P = 2.776e-17 (f64 floor, D2 symetrie), ∑L = 0 exact.
+
 ## 2026-05-07 — Sezení 5: Empirická validace spatial gridu, smoothstep tail, PE v modelshotu
 
 - **Sub-fix E5m:** doplněno `api.setUseGrid(false)`. Po sezení 4 (default přepnut na grid) E5m tichou regresí běžel s gridem místo naive — diary popis byl falešný. Memory `feedback_sanity_check` se aplikuje i na refactory (rerun starých presetů po změně defaultů).

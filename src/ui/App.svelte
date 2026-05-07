@@ -21,7 +21,12 @@
   let connectionCount = $state(0);
   let sumP = $state(0);
   let sumL = $state(0);
+  let sumE = $state(0);
+  let deltaE = $state(0);
   let fps = $state(0);
+  // E₀ baseline pro drift indikátor. null = ještě nezachycený (čeká na první display tick
+  // po prvním stepGravity, aby lastPE byla platná). Reset v resetScene.
+  let e0: number | null = null;
 
   // FACTS
   let facts = $state<Facts>(emptyFacts);
@@ -114,6 +119,9 @@
     facts = emptyFacts;
     sumP = 0;
     sumL = 0;
+    sumE = 0;
+    deltaE = 0;
+    e0 = null;
     lastPE = 0;
     currentPreset = null;
     stopAtTime = null;
@@ -420,6 +428,16 @@
           const d = computeDiagnostics(w);
           sumP = Math.hypot(d.px, d.py);
           sumL = d.L;
+          // Totální mechanická energie. lastPE je z poslední stepGravity substepu;
+          // pro rapier mode zůstane 0 (G=0 v E1/E2 → fyzicky správně).
+          const e = d.ke + lastPE;
+          // E₀ se zachytí až po prvním sim kroku, kdy lastPE má platnou hodnotu.
+          // Při simTime=0 (po preset apply / reset) by KE už byla nastavená, ale PE ne.
+          if (e0 === null && simTime > 0 && w.pixels.length > 0) {
+            e0 = e;
+          }
+          sumE = e;
+          deltaE = e0 === null ? 0 : e - e0;
           facts = computeFacts(w, d.cx, d.cy);
         }
 
@@ -458,6 +476,8 @@
       <dt>Connections</dt><dd>{connectionCount}</dd>
       <dt>∑P</dt><dd>{fmtSig4(sumP)} <span class="unit">kg·U/t</span></dd>
       <dt>∑L</dt><dd>{fmtSig4(sumL)} <span class="unit">kg·U²/t</span></dd>
+      <dt>∑E</dt><dd>{fmtSig4(sumE)} <span class="unit">kg·U²/t²</span></dd>
+      <dt>Δ∑E</dt><dd>{fmtSig4(deltaE)} <span class="unit">kg·U²/t²</span></dd>
       <dt>FPS</dt><dd>{fps}</dd>
     </dl>
 

@@ -6,7 +6,8 @@ export type Diagnostics = {
   /** Lineární hybnost systému — ideálně ~ 0 a konstantní (Newton 3 zachovává hybnost). */
   px: number;
   py: number;
-  /** Kinetická energie — neoscilační, pokud nepůsobí síly. S gravitací se mění (přechází do PE). */
+  /** Kinetická energie (translační + rotační). S gravitací se mění (přechází do PE).
+   *  Rotační složka = Σ ½·I·ω², I=m/6 pro pixel-čtverec o straně 1 U. */
   ke: number;
   /** Úhlová hybnost vůči těžišti — také zachovávaná, dokud není externí torque. */
   L: number;
@@ -26,13 +27,16 @@ export function computeDiagnostics(world: World): Diagnostics {
   let cy = 0;
   let mass = 0;
 
-  // První průchod: hybnost, KE, hmotnost, těžiště (bez angvel × inerce zatím).
+  // První průchod: hybnost, KE (translační + rotační), hmotnost, těžiště.
+  // I = m/6 pro pixel-čtverec o straně 1 U (∫∫ (x²+y²) dm přes [-0.5,0.5]² = m/6).
   for (const p of world.pixels) {
     const v = p.body.linvel();
+    const w = p.body.angvel();
     const t = p.body.translation();
     px += p.m * v.x;
     py += p.m * v.y;
     ke += 0.5 * p.m * (v.x * v.x + v.y * v.y);
+    ke += 0.5 * (p.m / 6) * w * w;
     cx += p.m * t.x;
     cy += p.m * t.y;
     mass += p.m;
