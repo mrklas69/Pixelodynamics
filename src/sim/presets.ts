@@ -96,7 +96,7 @@ export const PRESETS: Preset[] = [
       api.spawn(+0.5, 0, 1, 0, 0, 0);
       // Joint API zatím neimplementováno (fáze 3 work). E3 zatím slouží jako geometrický baseline.
     },
-    stopAtTime: 5,
+    stopAtTime: 30,
   },
   {
     id: 'e5',
@@ -165,7 +165,50 @@ export const PRESETS: Preset[] = [
     },
     stopAtTime: 30,
   },
+  {
+    id: 'pb500',
+    name: 'PB500 — perf benchmark (N=500)',
+    description:
+      '500 pixelů v √N čtvercovém gridu, spacing 3 U (range ~66 U). G=1, manual + grid. Stůl v klidu. Cutoff factor naladí slider v SETTINGS (3–12·ε). Auto-stop @ 5 s, modelshot pro ∑E ověření; FPS sleduj v STATS panelu.',
+    setup: (api) => {
+      api.setIntegration('manual');
+      api.setG(1.0);
+      api.setUseGrid(true);
+      pbSpawn(api, 500, 3);
+    },
+    stopAtTime: 30,
+  },
+  {
+    id: 'pb1000',
+    name: 'PB1000 — perf benchmark (N=1000)',
+    description:
+      '1000 pixelů v √N čtvercovém gridu, spacing 3 U (range ~93 U). G=1, manual + grid. Cutoff factor naladí slider. Auto-stop @ 5 s. Stejný protokol jako PB500.',
+    setup: (api) => {
+      api.setIntegration('manual');
+      api.setG(1.0);
+      api.setUseGrid(true);
+      pbSpawn(api, 1000, 3);
+    },
+    stopAtTime: 30,
+  },
 ];
+
+/**
+ * Benchmark spawn — N pixelů v deterministickém grid layoutu (cols × rows ≥ N),
+ * centred kolem (0,0). Spacing volený tak, aby ~část párů padla pod cutoff
+ * a ~část nad → grid má co kullovat. Pixely v klidu (vx=vy=0, rs=0).
+ */
+function pbSpawn(api: PresetAPI, n: number, spacing: number): void {
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const xOff = ((cols - 1) * spacing) / 2;
+  const yOff = ((rows - 1) * spacing) / 2;
+  for (let i = 0; i < n; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    api.spawn(col * spacing - xOff, row * spacing - yOff, 0, 0, 0, 0, 1, false);
+  }
+}
 
 /**
  * E6 spawn: cluster + singlet + test pixel přesně na L1 pro Plummer kernel.

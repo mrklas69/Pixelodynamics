@@ -12,7 +12,7 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] Spatial grid (uniform + cutoff) — sezení 4. Cutoff = 5·ε ≈ 7.5 U.
 - [x] Validovat spatial grid empiricky — sezení 5. E7n/E7g preset pair s 4×3 spread spawn (49/66 párů přes cutoff). E5 D4 setup byl nediskriminační (všechny páry < cutoff → grid≡naive). Klíčový závěr: grid je **culling decision** pro long-range gravitaci, ne approximation — pro spread setup KE/pos dramaticky odlišné (KE 1.73 vs. 3.77, radii 24 U vs. 10 U).
 - [x] Smoothstep tail (sezení 5) — `GRAVITY_TAIL_WIDTH = 1.0`, default zapnutý. 3-2 polynom W(r), force = -dU_mod/dr rigorózně (∑E drift 1e-3/60s, OK). Pozn.: smoothstep řeší **energy conservation across cutoff**, ne approximation quality.
-- [ ] Vizualizace centroidu jako křížek
+- [x] Vizualizace centroidu jako křížek — sezení 7. CSS overlay (16×16 px screen-fixed) přes `<div class="centroid">`. `computeCentroid` v diagnostics, `worldToScreen` v camera.ts. Po fázi 3 přepracovat na per-object.
 
 ## Fáze 3 — slepování
 
@@ -51,7 +51,7 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [ ] Largest (Most-pixels-in-object) — až budou objekty
 - [ ] Connections counter — až budou jointy
 - [x] Total energy E = KE + PE — sezení 6: ∑E + Δ∑E v STATS panelu, E₀ se zachytí při prvním display ticku po prvním sim kroku (PE platná). KE rozšířena o rotační složku ½·I·ω² (I=m/6).
-- [ ] Vyhodnotit `GRAVITY_CUTOFF_FACTOR` — současných 5·ε je culling pro spread konfigurace. Pro fázi 6+ („rozprostřený plyn") zvážit 8-10·ε. Měřit perf vs. kvalita aproximace.
+- [x] Vyhodnotit `GRAVITY_CUTOFF_FACTOR` — sezení 7. Benchmark M(PB1000, c={5,8,10}, t={5,10,20,30}) odhalil **density-bound strop**: po kolapsu shluku všechny cutoffy konvergují na 20 FPS bez ohledu na hodnotu. Default c=5 zůstává. Pro fázi 6+ rozprostřený plyn (rovnoměrná density) lze klidně zvýšit na 8-10. Slider `cutoff` v SETTINGS pro live tuning.
 
 ## Dokumentace
 

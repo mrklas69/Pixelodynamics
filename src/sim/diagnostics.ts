@@ -18,6 +18,23 @@ export type Diagnostics = {
   mass: number;
 };
 
+/**
+ * Lehká O(N) verze pro per-frame použití (např. vizualizace centroidu).
+ * Plný `computeDiagnostics` se volá jen v display ticku á 500 ms.
+ */
+export function computeCentroid(world: World): { cx: number; cy: number } | null {
+  if (world.pixels.length === 0) return null;
+  let cx = 0, cy = 0, mass = 0;
+  for (const p of world.pixels) {
+    const t = p.body.translation();
+    cx += p.m * t.x;
+    cy += p.m * t.y;
+    mass += p.m;
+  }
+  if (mass === 0) return null;
+  return { cx: cx / mass, cy: cy / mass };
+}
+
 export function computeDiagnostics(world: World): Diagnostics {
   let px = 0;
   let py = 0;

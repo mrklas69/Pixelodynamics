@@ -16,17 +16,22 @@
 //     očekávané ~O(N) pro homogenní rozložení.
 
 import type { World } from './physics';
-import { GRAVITY_CUTOFF_FACTOR, GRAVITY_TAIL_WIDTH } from './params';
+import { GRAVITY_TAIL_WIDTH } from './params';
 
 export type GravityParams = {
   G: number;
   eps: number;
   /**
-   * true = uniform spatial grid s hard cutoff 5·ε ≈ 7.5 U (produkční default).
+   * true = uniform spatial grid s hard cutoff `eps · cutoffFactor` (produkční default).
    * false = naivní O(N²) všech dvojic — nutné pro experimenty s párovou interakcí
    * na vzdálenostech > cutoff (např. L1 v E6).
    */
   useGrid: boolean;
+  /**
+   * Násobek `eps` definující cutoff radius gridu. Default 5 (cutoff = 7.5 U pro ε=1.5).
+   * Live-tunable přes SETTINGS slider; pro benchmark factor 5/8/10.
+   */
+  cutoffFactor: number;
 };
 
 // Module-level scratch — recyklujeme buckety mezi voláními, aby GC nezdroj.
@@ -183,7 +188,7 @@ function accumulateForcesGrid(
   ay: Float64Array,
   peRef: { pe: number },
 ): void {
-  const cutoff = p.eps * GRAVITY_CUTOFF_FACTOR;
+  const cutoff = p.eps * p.cutoffFactor;
   const cellSize = cutoff;
   const invCell = 1 / cellSize;
   const cutoff2 = cutoff * cutoff;

@@ -30,6 +30,18 @@ export function projection(cam: Camera, viewportPx: { w: number; h: number }): m
   return m;
 }
 
+/** Konverze world souřadnic na pixelové souřadnice canvasu (CSS px, origin top-left). */
+export function worldToScreen(
+  cam: Camera,
+  viewportPx: { w: number; h: number },
+  wx: number,
+  wy: number,
+): { x: number; y: number } {
+  const x = (wx - cam.x) * cam.zoom + viewportPx.w / 2;
+  const y = -(wy - cam.y) * cam.zoom + viewportPx.h / 2;
+  return { x, y };
+}
+
 /** Konverze pixelových souřadnic kurzoru na world souřadnice. */
 export function screenToWorld(
   cam: Camera,

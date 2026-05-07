@@ -2,12 +2,12 @@
   import { onMount } from 'svelte';
   import { World } from '../sim/physics';
   import { stepGravity } from '../sim/gravity';
-  import { computeDiagnostics } from '../sim/diagnostics';
+  import { computeDiagnostics, computeCentroid } from '../sim/diagnostics';
   import { computeFacts, emptyFacts, type Facts, type Champion } from '../sim/facts';
-  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID } from '../sim/params';
+  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
   import { Renderer } from '../render/gl';
-  import { createCamera, projection, screenToWorld } from '../render/camera';
+  import { createCamera, projection, screenToWorld, worldToScreen } from '../render/camera';
   import type { Camera, Pixel } from '../types';
   import { Keyboard } from '../input/keyboard';
   import { fmtSig4 } from './format';
@@ -37,6 +37,9 @@
   // Spatial grid přepínač — některé experimenty (E6) potřebují naive O(N²)
   // kvůli interakcím přes hard cutoff.
   let useGrid = $state(GRAVITY_USE_GRID);
+  // Cutoff factor pro grid mode (násobek ε). Live-tunable kvůli perf benchmarku
+  // PB500/PB1000 — měříme FPS pro factor 5/8/10 bez nutnosti reset preset.
+  let cutoffFactor = $state(GRAVITY_CUTOFF_FACTOR);
 
   // EXPERIMENT STATE
   let paused = $state(false);
@@ -61,6 +64,12 @@
   // Camera jako $state proxy — zobrazení v HUD i sliderům reaguje automaticky
   // a změny v render loopu (lock follow) jsou viditelné v UI bez ručního flushe.
   const camera: Camera = $state(createCamera());
+
+  // Kurzor — world pozice myši pro HUD. null = pointer mimo canvas.
+  let cursor = $state<{ x: number; y: number } | null>(null);
+
+  // Centroid systému ve screen-space px pro overlay křížek. null = prázdná scéna.
+  let centroidScreen = $state<{ x: number; y: number } | null>(null);
 
   // HOVER tooltip — info o nejbližším pixelu pod kurzorem.
   // null = mimo canvas / mimo pixel.
@@ -128,6 +137,8 @@
     stoppedAtTime = false;
     unlockCamera();
     hover = null;
+    cursor = null;
+    centroidScreen = null;
   }
 
   function showToast(msg: string, ms = 2500): void {
@@ -199,6 +210,7 @@
     G = 1;
     H = 1;
     useGrid = GRAVITY_USE_GRID; // reset na default; preset přepíše jen když si řekne
+    cutoffFactor = GRAVITY_CUTOFF_FACTOR;
     currentPreset = preset;
     stopAtTime = preset.stopAtTime ?? null;
     stoppedAtTime = false;
@@ -278,6 +290,7 @@
       const onPointerMove = (e: PointerEvent) => {
         const rect = canvas.getBoundingClientRect();
         const wp = screenToWorld(camera, viewport, e.clientX - rect.left, e.clientY - rect.top);
+        cursor = { x: wp.x, y: wp.y };
         const p = pickPixel(wp.x, wp.y);
         if (p) {
           const t = p.body.translation();
@@ -300,7 +313,10 @@
         }
       };
       canvas.addEventListener('pointermove', onPointerMove);
-      canvas.addEventListener('pointerleave', () => (hover = null));
+      canvas.addEventListener('pointerleave', () => {
+        hover = null;
+        cursor = null;
+      });
 
       let last = performance.now();
       let frames = 0;
@@ -351,7 +367,7 @@
           while (accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
             if (integration === 'manual' || integration === 'hybrid') {
               for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
-                const r = stepGravity(w, { G, eps: GRAVITY_EPSILON, useGrid }, SUB_DT);
+                const r = stepGravity(w, { G, eps: GRAVITY_EPSILON, useGrid, cutoffFactor }, SUB_DT);
                 lastPE = r.pe;
               }
             }
@@ -390,6 +406,14 @@
             unlockCamera();
             showToast(`Pixel #${lockId} zmizel — kamera odemčena`, 1500);
           }
+        }
+
+        // Centroid systému — overlay křížek. Per-frame O(N), zanedbatelné vs. simulace.
+        const c = computeCentroid(w);
+        if (c) {
+          centroidScreen = worldToScreen(camera, viewport, c.cx, c.cy);
+        } else if (centroidScreen !== null) {
+          centroidScreen = null;
         }
 
         // Render.
@@ -497,17 +521,32 @@
     <canvas bind:this={canvas}></canvas>
 
     <div class="hud" aria-live="polite">
-      {#if camera.lockTargetId !== null}
-        <span class="lock">🔒 #{camera.lockTargetId}</span>
-      {:else}
-        <span class="free">free</span>
-      {/if}
-      <span class="sep">·</span>
-      <span>x {fmtSig4(camera.x)}</span>
-      <span>y {fmtSig4(camera.y)}</span>
-      <span class="sep">·</span>
-      <span>zoom {fmtSig4(camera.zoom)} px/U</span>
+      <div class="hud-row">
+        <span class="lbl">cur</span>
+        {#if cursor}
+          <span>x {fmtSig4(cursor.x)}</span>
+          <span>y {fmtSig4(cursor.y)}</span>
+        {:else}
+          <span class="dim">—</span>
+        {/if}
+      </div>
+      <div class="hud-row">
+        {#if camera.lockTargetId !== null}
+          <span class="lock">🔒 #{camera.lockTargetId}</span>
+        {:else}
+          <span class="free">free</span>
+        {/if}
+        <span class="sep">·</span>
+        <span>x {fmtSig4(camera.x)}</span>
+        <span>y {fmtSig4(camera.y)}</span>
+        <span class="sep">·</span>
+        <span>zoom {fmtSig4(camera.zoom)} px/U</span>
+      </div>
     </div>
+
+    {#if centroidScreen}
+      <div class="centroid" style="left: {centroidScreen.x}px; top: {centroidScreen.y}px"></div>
+    {/if}
 
     {#if hover}
       <div
@@ -543,6 +582,11 @@
       <span>H</span>
       <input type="range" min="0" max="20" step="0.1" bind:value={H} />
       <output>{H.toFixed(1)}</output>
+    </label>
+    <label class="slider" title="Cutoff radius spatial gridu jako násobek ε. Live-tunable.">
+      <span>cutoff</span>
+      <input type="range" min="3" max="12" step="0.5" bind:value={cutoffFactor} />
+      <output>{cutoffFactor.toFixed(1)}·ε</output>
     </label>
     <button class="reset" onclick={resetScene}>Reset scény</button>
 
@@ -715,8 +759,8 @@
     left: 8px;
     bottom: 8px;
     display: flex;
-    gap: 8px;
-    align-items: baseline;
+    flex-direction: column;
+    gap: 2px;
     font-size: 11px;
     color: #7a8390;
     background: rgba(10, 13, 21, 0.7);
@@ -726,9 +770,46 @@
     pointer-events: none;
     user-select: none;
   }
+  .hud-row {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
   .hud .lock { color: #d8b76f; }
   .hud .free { color: #6f8ec1; }
   .hud .sep { color: #2a3142; }
+  .hud .lbl { color: #5b6370; min-width: 22px; }
+  .hud .dim { color: #2a3142; }
+
+  /* Centroid systému — křížek překrývající canvas, barva centroidu = jemně modrá.
+     Velikost ve screen px (fixed), nezávislá na zoomu. */
+  .centroid {
+    position: absolute;
+    width: 0;
+    height: 0;
+    pointer-events: none;
+    z-index: 5;
+  }
+  .centroid::before, .centroid::after {
+    content: '';
+    position: absolute;
+    background: #6f8ec1;
+    opacity: 0.85;
+  }
+  .centroid::before {
+    /* vodorovná */
+    left: -8px;
+    top: -0.5px;
+    width: 16px;
+    height: 1px;
+  }
+  .centroid::after {
+    /* svislá */
+    top: -8px;
+    left: -0.5px;
+    width: 1px;
+    height: 16px;
+  }
 
   /* Tooltip nad pixely. Pevná pozice vůči kurzoru, neblokuje pointer. */
   .tooltip {

@@ -1,5 +1,23 @@
 # DONE
 
+## 2026-05-07 — Sezení 7: Centroid křížek, cursor v HUD, cutoff factor benchmark
+
+- **Vizualizace centroidu** — uzavírá stale Příště (5 sezení). CSS overlay `<div class="centroid">` se ::before/::after pseudoelementy (16×16 px screen-fixed křížek modrý #6f8ec1). `computeCentroid(world)` v `diagnostics.ts` (lehká O(N) per-frame verze, vrací null pro prázdný world). `worldToScreen(cam, viewport, wx, wy)` v `camera.ts` (algebraická inverze `screenToWorld`). Update centroidu per frame v render loopu.
+- **Cursor world position v HUD** — split na 2 řádky přes `flex-direction: column`. 1. řádek `cur x y` (svět), 2. řádek `lock/x/y/zoom`. `$state cursor` updateován v `onPointerMove`, clear v `pointerleave`.
+- **Cutoff factor jako runtime parametr** — `GravityParams.cutoffFactor` přidán; `accumulateForcesGrid` čte z `p.cutoffFactor` místo z importované konstanty. Slider `cutoff` v SETTINGS panelu (3–12·ε, step 0.5, default `GRAVITY_CUTOFF_FACTOR=5`). Reset v `applyPreset`.
+- **Presety PB500 a PB1000** — deterministický grid spawn (cols × rows ≥ N, spacing 3 U), pixely v klidu. Helper `pbSpawn(api, n, spacing)` v `presets.ts`. stopAtTime 30 s pokrývá rovnoměrnou + kolabovanou fázi.
+- **Cutoff benchmark — `M(PB1000, cutoff, t) = FPS`:**
+
+  | t \\ c | 5 | 8 | 10 |
+  |---|---|---|---|
+  | 5  | 60 | 60 | 21 |
+  | 10 | 58 | 24 | 21 |
+  | 20 | 20 | 20 | 20 |
+  | 30 | 20 | 20 | 20 |
+
+  **Klíčový závěr:** strop je **density-bound, ne cutoff-bound**. V kolapsové fázi všechny cutoffy konvergují na 20 FPS (= vsync schod 60/3). Default c=5 zůstává.
+- **Edukativní vyjasnění** — centroid (vážený těžiště poloh) ≠ Lagrange L1 (rovnováha sil). Pro E6: centroid ≈ -8.83, L1 ≈ +7.43.
+
 ## 2026-05-07 — Sezení 6: Pages verifikace, ∑E + Δ∑E indikátor, rotační KE
 
 - **Pages deploy verifikován** — uzavření 5sezeňového stale dluhu ze sezení 1. Všech 5 GitHub Actions runs `success`, root + JS + CSS bundles HTTP 200, base path `/Pixelodynamics/` aplikovaný v `<script>`/`<link>`. Live na https://mrklas69.github.io/Pixelodynamics/. Žádné code změny nepotřeba.
