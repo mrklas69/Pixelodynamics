@@ -1,5 +1,19 @@
 # DONE
 
+## 2026-05-07 — Sezení 5: Empirická validace spatial gridu, smoothstep tail, PE v modelshotu
+
+- **Sub-fix E5m:** doplněno `api.setUseGrid(false)`. Po sezení 4 (default přepnut na grid) E5m tichou regresí běžel s gridem místo naive — diary popis byl falešný. Memory `feedback_sanity_check` se aplikuje i na refactory (rerun starých presetů po změně defaultů).
+- **Presety E7n a E7g** — 4×3 spread spawn (12 pixelů, spacing 6 U, range 18×12 U). 49/66 párů přes cutoff 7.5 U → grid skutečně skipuje páry. E5 D4 setup byl nediskriminační (všechny páry pod cutoff → grid≡naive bit-identicky). Spawn helper `e7Spawn()` v `presets.ts`.
+- **Smoothstep tail** v `accumulateForcesGrid` (`gravity.ts`). Window `W(r) = 1 - (3t² - 2t³)` pro `t = (r_raw - r_inner)/tailWidth`, kde `r_inner = cutoff - tailWidth`. Force = `Gmm·(W·invR3 + 6t(1-t)/(tailWidth·rSoft·rRaw))·dx` — rigorózně `F = -dU_mod/dr` pro `U_mod = U·W`. `GRAVITY_TAIL_WIDTH = 1.0` v `params.ts`, default zapnutý.
+- **PE v `Modelshot.diagnostics`** — `lastPE` cache v `App.svelte` z poslední `stepGravity` substepu. Reset v `resetScene`. Pro rapier mód zůstává 0 (presety E1–E3 mají G=0 → fyzicky pe=0).
+- **Fix komentáře `params.ts`** — `F(cutoff) ≈ 0.008·F_peak` byl nepravdivý (počítal kernel ratio bez faktoru `r`). Skutečně `F(7.5)/F_peak ≈ 0.10`. Komentář přepsán s přepočtem.
+- **Projektový `CLAUDE.md`** — definice maker `@BEGIN` (start dev serveru, audit cadence, stale Příště) a `@END` (DOCS, check, commit, stop server).
+- **Empirická validace energy conservation:**
+  - **E7n (naive):** PE(0) = -6.708 (manuální výpočet, 66 párů × 1/√(r²+ε²)). E(60) = 3.7666 + (-10.4753) = -6.7087. ∑E drift **6e-4 / 60 s** = 1 v 10⁴.
+  - **E7g (grid + smoothstep):** PE(0) = -2.749 (jen 17 nejbližších párů, r_raw=6 < r_inner=6.5). E(60) = 3.7339 + (-6.4839) = -2.7500. ∑E drift **1e-3 / 60 s** ≈ symplectic Euler truncation.
+  - Oba běhy zachovaly ∑E na úroveň truncation. ∑P, ∑L exact 0 (D2 symetrie).
+- **Klíčový závěr:** spatial grid s `cutoff_factor=5` je **culling decision** pro long-range gravitaci, ne approximation. Pro spread setup (E7) se chová kvalitativně jinak než naive (KE 1.73 vs. 3.77, radii 24-28 U vs. 4-10 U). Smoothstep tail neobnovuje cut-off long-range sílu — řeší jen energy conservation across cutoff přechod. Pro Pixelodynamics use case (slepené klastry) je culling OK; pro fázi 6+ rozprostřený plyn zvážit větší `CUTOFF_FACTOR`.
+
 ## 2026-05-07 — Sezení 1: FVP scaffold
 
 - Vite + Svelte 5 + TypeScript (strict, `noUncheckedIndexedAccess`)

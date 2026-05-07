@@ -48,6 +48,10 @@
   let shotAuto = $state(false);
   let shotTextarea: HTMLTextAreaElement | undefined = $state();
 
+  // Cache PE z poslední gravity substepu — modelshot ho potřebuje k ověření ∑E.
+  // Pro rapier mód (žádný stepGravity call) zůstane 0; tam je G=0 → pe=0 fyzicky.
+  let lastPE = 0;
+
   let world: World | null = null;
   // Camera jako $state proxy — zobrazení v HUD i sliderům reaguje automaticky
   // a změny v render loopu (lock follow) jsou viditelné v UI bez ručního flushe.
@@ -110,6 +114,7 @@
     facts = emptyFacts;
     sumP = 0;
     sumL = 0;
+    lastPE = 0;
     currentPreset = null;
     stopAtTime = null;
     stoppedAtTime = false;
@@ -138,7 +143,7 @@
       H,
       GRAVITY_EPSILON,
       GRAVITY_SUBSTEPS,
-      { px: d.px, py: d.py, L: d.L, ke: d.ke },
+      { px: d.px, py: d.py, L: d.L, ke: d.ke, pe: lastPE },
     );
     const json = JSON.stringify(shot, null, 2);
 
@@ -338,7 +343,8 @@
           while (accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
             if (integration === 'manual' || integration === 'hybrid') {
               for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
-                stepGravity(w, { G, eps: GRAVITY_EPSILON, useGrid }, SUB_DT);
+                const r = stepGravity(w, { G, eps: GRAVITY_EPSILON, useGrid }, SUB_DT);
+                lastPE = r.pe;
               }
             }
             if (integration === 'rapier' || integration === 'hybrid') {

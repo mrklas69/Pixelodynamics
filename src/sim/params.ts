@@ -28,13 +28,31 @@ export const GRAVITY_SUBSTEPS = 4;
 export const GRAVITY_USE_GRID = true;
 
 /**
- * Cutoff radius pro grid mode jako násobek `ε`. Plummer force klesá jako
- * `(ε² / (r² + ε²))^{3/2}`, takže pro factor=5 je `F(cutoff) ≈ 0.008 · F_peak`.
+ * Cutoff radius pro grid mode jako násobek `ε`. Plummer force per dvojici je
+ * `F(r) = G·m1·m2·r / (r² + ε²)^{3/2}` (peakuje v `r_peak = ε/√2`).
+ * Pro factor=5 a ε=1.5 (cutoff=7.5 U): `F(cutoff) / F_peak ≈ 0.098` — tj. **10 %** peaku.
  *
- * Vyšší = méně truncation chyby, větší buňky, méně sousedů ale víc per-bucket práce.
- * Důsledek: hard cutoff bez smoothing tail = malý nespojitý skok force při překročení
- * — `∑P` a `∑L` zůstávají exact (Newton 3 v páru je symetrický), ale `KE` má malé
- * skoky při krossování cutoffu. Pro orbital scénář je to neviditelné, pro „rozprostřený plyn"
- * by stálo za to doplnit smoothstep tail.
+ * Empirická validace E7n vs. E7g (sezení 5) potvrdila, že to NENÍ aproximace naive
+ * — pro spread-out konfigurace (12 px ve 4×3 gridu, 49/66 párů přes cutoff) je
+ * dynamika dramaticky odlišná: KE 1.73 vs. 3.77, vnější pixely odlétly do 17 U
+ * místo 10 U. Hard cutoff je tedy CULLING DECISION, ne approximation.
+ *
+ * Smoothstep tail (`GRAVITY_TAIL_WIDTH`) přidává C¹-spojitý dopadávací profil
+ * v posledním 1 U cutoffu, aby přechod nebyl skokový. Bez tail: ∑P/∑L exact
+ * (Newton 3 symetrický), KE má skoky. S tail: KE drift se rozetře přes transition
+ * zone a integrátor zachovává ∑E = KE + PE správně.
  */
 export const GRAVITY_CUTOFF_FACTOR = 5.0;
+
+/**
+ * Šířka smoothstep transition zone v U na vnitřním okraji cutoffu.
+ * Window W(r) = 1 pro r ≤ cutoff − tailWidth, plynule klesá k 0 na r = cutoff
+ * 3-2 polynomem `1 - (3t² - 2t³)`, t = (r − r_inner) / tailWidth.
+ *
+ * U_mod(r) = U(r)·W(r) je modifikovaný potenciál; síla je rigorózně −dU_mod/dr,
+ * což zaručuje konzervaci celkové energie (nikoli jen KE skoky kompenzace).
+ *
+ * 0 = vypnuto (čistý hard cutoff). 1 U je default — zachovává plnou Plummer
+ * sílu pro r ≤ 6.5 U, postupně utlumí na 7.5 U.
+ */
+export const GRAVITY_TAIL_WIDTH = 1.0;

@@ -16,7 +16,7 @@
 //     očekávané ~O(N) pro homogenní rozložení.
 
 import type { World } from './physics';
-import { GRAVITY_CUTOFF_FACTOR } from './params';
+import { GRAVITY_CUTOFF_FACTOR, GRAVITY_TAIL_WIDTH } from './params';
 
 export type GravityParams = {
   G: number;
@@ -161,13 +161,17 @@ function accumulateForcesNaive(
 /**
  * Uniform spatial grid. Cell size = cutoff = `eps × CUTOFF_FACTOR`. Pro každou buňku
  * iteruj 3×3 sousedství; uvnitř páruj pixely s `j > i` (dedup) a počítej jen pokud
- * `r ≤ cutoff`. Hard cutoff: za hranicí force = 0.
+ * `r ≤ cutoff`.
+ *
+ * Smoothstep tail: pokud `GRAVITY_TAIL_WIDTH > 0`, v transition zóně `[r_inner, cutoff]`
+ * (kde `r_inner = cutoff − tailWidth`) se aplikuje 3-2 polynom `W(r) = 1 − (3t² − 2t³)`
+ * na potenciál `U_mod = U·W`, a síla je rigorózně `F = −dU_mod/dr` (zachovává `∑E`).
+ * Mimo transition zónu je W=1 (uvnitř) nebo skip (vně).
  *
  * Konzervace:
- *  - ∑P exact (každý pár přidá Newton 3 symetricky).
- *  - ∑L exact pro radiální páry (gravitační síla je radiální).
- *  - KE má malé skoky při krossování cutoffu (síla nespojitá v r=cutoff). Pro
- *    orbital scénáře neviditelné, pro „rozprostřený plyn" typicky < 0.1 % drift /s.
+ *  - ∑P exact (každý pár přidá Newton 3 symetricky, bez ohledu na W).
+ *  - ∑L exact pro radiální páry — síla zůstává radiální (W závisí jen na |r|, ne směru).
+ *  - ∑E = KE + PE konzervováno do truncation symplektického Eulera (W·U je hladký).
  */
 function accumulateForcesGrid(
   p: GravityParams,
@@ -184,6 +188,11 @@ function accumulateForcesGrid(
   const invCell = 1 / cellSize;
   const cutoff2 = cutoff * cutoff;
   const eps2 = p.eps * p.eps;
+  // Smoothstep transition zone: pro r_raw ∈ [innerCutoff, cutoff] aplikuj window.
+  // tailWidth=0 → hard cutoff (innerCutoff = cutoff, transition vypnutá v if-čeku).
+  const tailWidth = GRAVITY_TAIL_WIDTH;
+  const innerCutoff = cutoff - tailWidth;
+  const innerCutoff2 = innerCutoff * innerCutoff;
   let pe = 0;
 
   clearGrid();
@@ -235,17 +244,34 @@ function accumulateForcesGrid(
             const r2raw = ddx * ddx + ddy * ddy;
             if (r2raw > cutoff2) continue;
             const r2 = r2raw + eps2;
-            const r = Math.sqrt(r2);
-            const invR3 = 1 / (r2 * r);
+            const rSoft = Math.sqrt(r2);
+            const invR3 = 1 / (r2 * rSoft);
             const mj = m[j]!;
-            const f = p.G * mi * mj * invR3;
-            const fxij = f * ddx;
-            const fyij = f * ddy;
+            const Gmm = p.G * mi * mj;
+
+            // Window faktor W(r) a jeho gradient term.
+            // Pro r_raw ≤ innerCutoff: W=1, žádný extra force člen → standardní Plummer.
+            // Pro r_raw > innerCutoff: W = 1 − (3t² − 2t³), přidává se −U·W'/r_raw·dx
+            //   k force, což odpovídá F = −dU_mod/dr_raw přesně.
+            let W = 1;
+            let extraTerm = 0;
+            if (tailWidth > 0 && r2raw > innerCutoff2) {
+              const rRaw = Math.sqrt(r2raw);
+              const t = (rRaw - innerCutoff) / tailWidth;
+              W = 1 - t * t * (3 - 2 * t);
+              // ds/dt = 6t(1−t); W' = −ds/dt / tailWidth.
+              // Force korekce: −U(r_raw)·W'·dx/r_raw = G·m·m / rSoft · 6t(1−t)/(tailWidth·rRaw) · dx
+              extraTerm = (6 * t * (1 - t)) / (tailWidth * rSoft * rRaw);
+            }
+
+            const fCoeff = Gmm * (W * invR3 + extraTerm);
+            const fxij = fCoeff * ddx;
+            const fyij = fCoeff * ddy;
             ax[i] = ax[i]! + fxij / mi;
             ay[i] = ay[i]! + fyij / mi;
             ax[j] = ax[j]! - fxij / mj;
             ay[j] = ay[j]! - fyij / mj;
-            pe -= (p.G * mi * mj) / r;
+            pe -= (Gmm * W) / rSoft;
           }
         }
       }

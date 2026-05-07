@@ -118,7 +118,37 @@ export const PRESETS: Preset[] = [
     setup: (api) => {
       api.setIntegration('manual');
       api.setG(1.0);
+      // Naive O(N²) — historický baseline ze sezení 3, kdy spatial grid neexistoval.
+      // Bez explicitního setUseGrid by E5m visel na default GRAVITY_USE_GRID (po sezení 4 = true)
+      // a tichá změna by zfalšovala srovnání s hybridem.
+      api.setUseGrid(false);
       e5Spawn(api);
+    },
+    stopAtTime: 60,
+  },
+  {
+    id: 'e7n',
+    name: 'E7n — Grid validace: naive baseline',
+    description:
+      '12 pixelů ve 4×3 gridu (spacing 6 U, range 18×12 U), manual Euler, naive O(N²) gravita. Většina párů (49 ze 66) je za cutoff 7.5 U — referenční pole pro porovnání s gridem v E7g. Stejný spawn = bit-by-bit diff modelshotů.',
+    setup: (api) => {
+      api.setIntegration('manual');
+      api.setG(1.0);
+      api.setUseGrid(false);
+      e7Spawn(api);
+    },
+    stopAtTime: 60,
+  },
+  {
+    id: 'e7g',
+    name: 'E7g — Grid validace: spatial grid',
+    description:
+      'Stejný setup jako E7n, ale s GRAVITY_USE_GRID=true. Hard cutoff 7.5 U vyřízne 49 ze 66 párů. Měříme: (a) ∑P/∑L drift na f64 floor jako E7n? (b) KE drift sekulární vs. oscilační? (c) divergence trajektorií od chaosu po f64 ulp na hraně cutoffu.',
+    setup: (api) => {
+      api.setIntegration('manual');
+      api.setG(1.0);
+      api.setUseGrid(true);
+      e7Spawn(api);
     },
     stopAtTime: 60,
   },
@@ -198,6 +228,34 @@ function e6Spawn(api: PresetAPI): void {
   api.spawn(clusterX + r, 0, 0, 0, 0, 0, 1);
 }
 
+/**
+ * Sdílený spawn pro E7n/E7g — 4×3 grid, spacing 6 U, range 18×12 U.
+ *
+ * Distribuce párů vůči cutoff 5·ε = 7.5 U (`GRAVITY_CUTOFF_FACTOR=5`, ε=1.5):
+ *   - 17 sousedních párů (dx=6 nebo dy=6, druhá osa 0) → uvnitř cutoff
+ *   - 49 vzdálenějších párů (dx²+dy² ≥ 72 U²) → mimo cutoff
+ *
+ * E5/E5m D4 setup měl všechny páry pod cutoff → grid implementace tam dávala
+ * bit-identický výsledek jako naive a nedalo se nic změřit. Tahle konfigurace
+ * vynucuje, aby grid skutečně skipoval většinu párů.
+ *
+ * Počáteční rychlosti = 0 → systém se v gravitaci postupně rozkmitá. Chaos je
+ * žádoucí: ulp roundoff na hranicích cutoff se exponenciálně amplifikuje a
+ * trajektorie pixelů se rozejdou viditelně, pokud je kernel rozbitý.
+ */
+function e7Spawn(api: PresetAPI): void {
+  const cols = 4;
+  const rows = 3;
+  const spacing = 6;
+  const offsetX = ((cols - 1) * spacing) / 2;
+  const offsetY = ((rows - 1) * spacing) / 2;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      api.spawn(col * spacing - offsetX, row * spacing - offsetY, 0, 0, 0, 0);
+    }
+  }
+}
+
 /** Sdílený spawn 12 pixelů v D4 symetrii (E5 a E5m musí mít bit-identický setup). */
 function e5Spawn(api: PresetAPI): void {
   const positions: [number, number][] = [
@@ -246,7 +304,12 @@ export type Modelshot = {
   simTime: number;
   params: { G: number; H: number; epsilon: number; substeps: number };
   pixels: { id: number; x: number; y: number; vx: number; vy: number; r: number; rs: number; m: number }[];
-  diagnostics: { px: number; py: number; L: number; ke: number };
+  /**
+   * `pe` = potenciální energie (z gravity kernelu, včetně případného window faktoru).
+   * Bez `pe` nelze ověřit zachování ∑E = KE + PE — KE samo o sobě osciluje s PE.
+   * Pro mód `rapier` je `pe` typicky 0 (presety E1–E3 mají G=0).
+   */
+  diagnostics: { px: number; py: number; L: number; ke: number; pe: number };
 };
 
 export function buildModelshot(
@@ -258,7 +321,7 @@ export function buildModelshot(
   H: number,
   epsilon: number,
   substeps: number,
-  diag: { px: number; py: number; L: number; ke: number },
+  diag: { px: number; py: number; L: number; ke: number; pe: number },
 ): Modelshot {
   return {
     version: 1,

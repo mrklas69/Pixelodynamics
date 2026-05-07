@@ -9,9 +9,9 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] Manuální symplektický Eulerův integrátor (Rapier step() obejít) — zachovává ∑P a ∑L
 - [x] Substepping (4× per frame) pro nižší truncation error
 - [x] Profilovat: jak vysoké N zvládne current naive O(n²) kód — P100=60, P500=60, P1000=45, P2000=12 (sezení 3, manual mód, G=1)
-- [x] Spatial grid (uniform + cutoff) — sezení 4. Cutoff = 5·ε ≈ 7.5 U. Hard cutoff bez smooth tail; ∑P/∑L exact, KE má drobné skoky při krossování cutoffu.
-- [ ] Validovat spatial grid empiricky — preset srovnání naive vs. grid na E5 setupu (12 pix, 60 s). Naměřit ∑P/∑L drift a `simTime` per frame.
-- [ ] Smoothstep tail na poslední 1 U cutoffu — opt-in pokud KE drift v rozprostřené scéně bude problém. Polynomial 3-2 spline na force i potenciálu.
+- [x] Spatial grid (uniform + cutoff) — sezení 4. Cutoff = 5·ε ≈ 7.5 U.
+- [x] Validovat spatial grid empiricky — sezení 5. E7n/E7g preset pair s 4×3 spread spawn (49/66 párů přes cutoff). E5 D4 setup byl nediskriminační (všechny páry < cutoff → grid≡naive). Klíčový závěr: grid je **culling decision** pro long-range gravitaci, ne approximation — pro spread setup KE/pos dramaticky odlišné (KE 1.73 vs. 3.77, radii 24 U vs. 10 U).
+- [x] Smoothstep tail (sezení 5) — `GRAVITY_TAIL_WIDTH = 1.0`, default zapnutý. 3-2 polynom W(r), force = -dU_mod/dr rigorózně (∑E drift 1e-3/60s, OK). Pozn.: smoothstep řeší **energy conservation across cutoff**, ne approximation quality.
 - [ ] Vizualizace centroidu jako křížek
 
 ## Fáze 3 — slepování
@@ -50,7 +50,8 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] Hover infotipy nad pixely (id, x, y, vx, vy, r, rs, m, |v|)
 - [ ] Largest (Most-pixels-in-object) — až budou objekty
 - [ ] Connections counter — až budou jointy
-- [ ] Total energy E = KE + PE (validace integrátoru)
+- [~] Total energy E = KE + PE — sezení 5: PE přidána do `Modelshot.diagnostics` přes `lastPE` cache v App.svelte. Display v STATS panelu zatím chybí (přidat ∑E + drift indikátor).
+- [ ] Vyhodnotit `GRAVITY_CUTOFF_FACTOR` — současných 5·ε je culling pro spread konfigurace. Pro fázi 6+ („rozprostřený plyn") zvážit 8-10·ε. Měřit perf vs. kvalita aproximace.
 
 ## Dokumentace
 

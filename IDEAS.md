@@ -49,7 +49,7 @@ type CompositeObject = {
 
 ## Performance
 
-- **Smoothstep cutoff tail** (sezení 4 → TODO) — současný spatial grid má hard cutoff (`r > 5·ε` → force = 0), což na ostré hranici nespojitě skáče. ∑P/∑L exact, ale KE má drobné skoky. Smoothstep `S(r) = (1-t)²(1+2t)` pro `t = (r - r_inner) / (r_cutoff - r_inner)` na poslední 1 U → spojitá force i potenciál. Doplnit *po* empirické validaci — pokud drift v rozprostřené scéně < 0.1 %/s, není třeba.
+- **Smoothstep cutoff tail** (sezení 4 → DONE sezení 5) — implementováno jako default `GRAVITY_TAIL_WIDTH = 1.0`. 3-2 polynom W(r), `U_mod = U·W`, `F = -dU_mod/dr` rigorózně. ∑E drift 1e-3/60s ≈ symplectic Euler truncation. Klíčové zjištění: smoothstep řeší **energy conservation across cutoff** (KE skoky), NE **approximation quality** (cut long-range gravity zůstává). Pro spread setup se grid stále chová kvalitativně jinak než naive.
 - **Multithreaded Rapier** — `@dimforge/rapier2d` (ne -compat) běží přes WebWorker. Cena: cross-origin isolation v deploy. Až bude potřeba.
 - **GPU-side instance buffer** — místo CPU upload každý frame, sdílená paměť přes WebGPU compute. Velký krok, jen pokud narazíme na strop.
 
