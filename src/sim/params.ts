@@ -45,6 +45,20 @@ export const GRAVITY_USE_GRID = true;
 export const GRAVITY_CUTOFF_FACTOR = 5.0;
 
 /**
+ * γ optimalizace pro `hybrid-α/β`: pokud `world.joints.length === 0` a žádné kontakty
+ * (jakmile je zapneme), preskočit `world.step()` celkem — manuální Euler stačí. Když se
+ * objeví joint, automaticky zapne se Rapier step.
+ *
+ * Důvod: orbitální fáze před slepenci nemá Rapier co řešit (G=0 globální, žádné
+ * constraints), takže Rapier step jen drobně tlumí ∑P/∑L kvůli f32 bridge. Bypass dává
+ * konzervaci na úroveň pure manual módu, dokud se joint scénář neaktivuje.
+ *
+ * `false` = vždycky zavolat Rapier step v hybrid módech (pro debug / přesný porovnání s
+ * variantou bez jointu).
+ */
+export const SKIP_RAPIER_IF_NO_JOINTS = true;
+
+/**
  * Šířka smoothstep transition zone v U na vnitřním okraji cutoffu.
  * Window W(r) = 1 pro r ≤ cutoff − tailWidth, plynule klesá k 0 na r = cutoff
  * 3-2 polynomem `1 - (3t² - 2t³)`, t = (r − r_inner) / tailWidth.

@@ -1,5 +1,22 @@
 # DONE
 
+## 2026-05-08 — Sezení 9: Stage 2 hybrid orchestrace — α etablováno jako default
+
+- **`IntegrationMode` rozšířen** z `'manual' | 'rapier' | 'hybrid'` na **`'manual' | 'rapier' | 'hybrid-naive' | 'hybrid-α' | 'hybrid-β'`** (`src/sim/presets.ts`). Stávající E5 přepsán na `'hybrid-naive'` (zachování experimentální historie).
+- **`stepGravity` refaktor** (`src/sim/gravity.ts`) — split na `stepGravity` (full kick+drift) a **novou `stepGravityKickOnly`** (jen kick, write linvel; pos/rotation drift dělá Rapier). Sdílený `readState` + `accumulateAccel` interní helper.
+- **Save-zero-restore helpers** (`src/sim/physics.ts`) — `saveZeroVel(world): SavedVel` (ulož linvel/angvel non-pinned, set 0/0) + `restoreVelDelta(world, saved)` (addback delta z constraint impulses). Pro β.
+- **γ flag `SKIP_RAPIER_IF_NO_JOINTS=true`** (`src/sim/params.ts`) — orthogonal optimization. Bez jointů hybrid-α/β skip Rapier step → ekvivalent pure manual mode (∑P/∑L na f64 ulp). S jointy → full hybrid.
+- **Main loop switch** (`src/ui/App.svelte`) — `switch(integration)` nad pěti módy. γ check (`skipRapier = SKIP_RAPIER_IF_NO_JOINTS && w.joints.length === 0`). Hybrid-α s skipRapier degeneruje na full manual (kick-only by jen akumuloval vel bez Rapier driftu).
+- **UI dropdown `mód`** v SETTINGS panelu (po cutoff slideru) s 5 hodnotami. CSS `.select` styl analogie `.slider`. Default integration změněn z `'manual'` na **`'hybrid-α'`** — γ flag automaticky degeneruje na manual když nejsou joints, takže existující čistě gravitační scénáře přechod nepocítí.
+- **E8 trojice presetů** se sdíleným `e8Spawn(api)`: pinned attractor (M=10) v (0,0), free pair (m=1+m=1) na (R±0.5, 0) s tečnou v_circ=√(GM/R)≈1.414, R=5, FixedJoint. tuneRapier solver=16/PGS=4/canSleep=false.
+  - **E8r** — pure rapier (broken baseline pro orbit, free pair letí balisticky bez gravity protože rapier mód nevolá `stepGravity`)
+  - **E8α** — hybrid-α (∑E drift 0.04 %/30 s, joint distance ~0.99, rs=0.32)
+  - **E8β** — hybrid-β (∑E drift 13 %/30 s, rs≈0 — joint solver bez context o stress kvůli vel=0)
+- **Verdikt:** α working, β rejected, γ jako orthogonal optimization. β kód zachován pro reprodukovatelnost a potenciální budoucí refinement (např. partial save).
+- **Lessons learned:**
+  - E8r baseline mismodelovaný — pure rapier mode nezavolá `stepGravity`, takže pure rapier není reference pro orbit. **Mental simulation každého presetu před spuštěním**, ne pouze po modelshotu.
+  - β patologii bylo možné predikovat z první principů (vel=0 maskuje stress pro joint solver) — **algoritmický sanity check krok po kroku** před implementací, ne empirické defaulting.
+
 ## 2026-05-08 — Sezení 8: Fáze 3 entry — FixedJoint API, audio, edge mask, sleep-mode fix
 
 - **FixedJoint API** (`src/sim/joints.ts`) — `createFixedJoint(world, a, b)` (anchor = midpoint v lokálním frame přes `R(-rot)·worldOffset`), `removeJoint`, `removeAllJointsSilent`. Frame parametr `JointData.fixed(anchorA, rB-rA, anchorB, 0)` preserve aktuální rotation gap (žádný snap při create i pro pixely s random rotacemi).

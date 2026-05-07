@@ -54,46 +54,21 @@ function takeBucket(): number[] {
   return bucketPool.pop() ?? [];
 }
 
+/**
+ * Plný symplektický Euler krok — kick (v += a·dt) + drift (x += v·dt, angle += ω·dt) + write-back.
+ *
+ * Použití: módy `manual` a `hybrid-naive`. Pro `hybrid-α` se Rapier postará o drift, takže
+ * volej `stepGravityKickOnly` místo tohoto.
+ */
 export function stepGravity(world: World, p: GravityParams, dt: number): { pe: number } {
   const pixels = world.pixels;
   const n = pixels.length;
   if (n === 0) return { pe: 0 };
 
-  // Cache stavu — minimalizuje volání přes WASM bridge.
-  const px = new Float64Array(n);
-  const py = new Float64Array(n);
-  const vx = new Float64Array(n);
-  const vy = new Float64Array(n);
-  const m = new Float64Array(n);
-  const angles = new Float64Array(n);
-  const omegas = new Float64Array(n);
-  const pinned = new Uint8Array(n); // 1 = nehybný (skip kick+drift+write-back)
-  for (let i = 0; i < n; i++) {
-    const pixel = pixels[i]!;
-    const t = pixel.body.translation();
-    const v = pixel.body.linvel();
-    px[i] = t.x;
-    py[i] = t.y;
-    vx[i] = v.x;
-    vy[i] = v.y;
-    m[i] = pixel.m;
-    angles[i] = pixel.body.rotation();
-    omegas[i] = pixel.body.angvel();
-    pinned[i] = pixel.pinned ? 1 : 0;
-  }
-
-  // Akumulace gravitačních zrychlení (a, ne F — F dělíme hmotnostmi v místě).
-  const ax = new Float64Array(n);
-  const ay = new Float64Array(n);
-  const peRef = { pe: 0 };
-
-  if (p.G !== 0 && n >= 2) {
-    if (p.useGrid) {
-      accumulateForcesGrid(p, n, px, py, m, ax, ay, peRef);
-    } else {
-      accumulateForcesNaive(p, n, px, py, m, ax, ay, peRef);
-    }
-  }
+  const state = readState(world);
+  const accel = accumulateAccel(p, state);
+  const { px, py, vx, vy, angles, omegas, pinned } = state;
+  const { ax, ay } = accel;
 
   // Symplektický Euler: nejprve kick (v += a·dt), pak drift (x += v·dt).
   // Pořadí kick-drift garantuje exact symetrii ∑P (Newton 3) a zachování ∑L pro radiální síly.
@@ -119,7 +94,100 @@ export function stepGravity(world: World, p: GravityParams, dt: number): { pe: n
     body.setRotation(angles[i]!, true);
   }
 
-  return { pe: peRef.pe };
+  return { pe: accel.pe };
+}
+
+/**
+ * Kick-only varianta pro `hybrid-α` (Velocity-Verlet split). Aplikuje jen `v += a·dt` a píše
+ * zpět **jen linvel**; pos a rotation drift dělá následný Rapier `world.step(dt)`. Pinned
+ * pixely přeskočeny stejně jako v `stepGravity`.
+ *
+ * Důvod splitu: čistě manuální integrace zachovává ∑P/∑L do f64 ulp, ale joint constraints
+ * v Rapieru řeší **pos-level** (Baumgarte) — vyžadují, aby drift dělal Rapier sám. Α
+ * decoupluje kick (gravita) od driftu (Rapier), aby joint solver měl autoritu nad pos.
+ */
+export function stepGravityKickOnly(world: World, p: GravityParams, dt: number): { pe: number } {
+  const pixels = world.pixels;
+  const n = pixels.length;
+  if (n === 0) return { pe: 0 };
+
+  const state = readState(world);
+  const accel = accumulateAccel(p, state);
+  const { vx, vy, pinned } = state;
+  const { ax, ay } = accel;
+
+  // Jen kick — pos a rotation nech v Rapier body, drift udělá world.step().
+  for (let i = 0; i < n; i++) {
+    if (pinned[i]) continue;
+    vx[i] = vx[i]! + ax[i]! * dt;
+    vy[i] = vy[i]! + ay[i]! * dt;
+  }
+
+  // Write-back jen linvel (pos i rot zůstávají, jak jsou — Rapier je posune).
+  for (let i = 0; i < n; i++) {
+    if (pinned[i]) continue;
+    pixels[i]!.body.setLinvel({ x: vx[i]!, y: vy[i]! }, true);
+  }
+
+  return { pe: accel.pe };
+}
+
+type GravityState = {
+  n: number;
+  px: Float64Array;
+  py: Float64Array;
+  vx: Float64Array;
+  vy: Float64Array;
+  m: Float64Array;
+  angles: Float64Array;
+  omegas: Float64Array;
+  pinned: Uint8Array;
+};
+
+/** Nasaje stav pixelů z Rapier bodyů do f64 typed arrays — minimalizuje WASM bridge calls. */
+function readState(world: World): GravityState {
+  const pixels = world.pixels;
+  const n = pixels.length;
+  const px = new Float64Array(n);
+  const py = new Float64Array(n);
+  const vx = new Float64Array(n);
+  const vy = new Float64Array(n);
+  const m = new Float64Array(n);
+  const angles = new Float64Array(n);
+  const omegas = new Float64Array(n);
+  const pinned = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const pixel = pixels[i]!;
+    const t = pixel.body.translation();
+    const v = pixel.body.linvel();
+    px[i] = t.x;
+    py[i] = t.y;
+    vx[i] = v.x;
+    vy[i] = v.y;
+    m[i] = pixel.m;
+    angles[i] = pixel.body.rotation();
+    omegas[i] = pixel.body.angvel();
+    pinned[i] = pixel.pinned ? 1 : 0;
+  }
+  return { n, px, py, vx, vy, m, angles, omegas, pinned };
+}
+
+/** Akumulace gravitačních zrychlení podle p.useGrid. Vrací ax, ay, pe. */
+function accumulateAccel(
+  p: GravityParams,
+  s: GravityState,
+): { ax: Float64Array; ay: Float64Array; pe: number } {
+  const ax = new Float64Array(s.n);
+  const ay = new Float64Array(s.n);
+  const peRef = { pe: 0 };
+  if (p.G !== 0 && s.n >= 2) {
+    if (p.useGrid) {
+      accumulateForcesGrid(p, s.n, s.px, s.py, s.m, ax, ay, peRef);
+    } else {
+      accumulateForcesNaive(p, s.n, s.px, s.py, s.m, ax, ay, peRef);
+    }
+  }
+  return { ax, ay, pe: peRef.pe };
 }
 
 /** Naivní O(N²) — všechny dvojice. Reference baseline. */

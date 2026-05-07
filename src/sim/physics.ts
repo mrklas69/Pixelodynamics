@@ -129,3 +129,59 @@ export class World {
     this.rapier.step();
   }
 }
+
+/**
+ * Snapshot rychlostí pixelů — used pro `hybrid-β` (save-zero-restore).
+ * Pinned pixely se ukládají také (lin/ang vel = 0), ale `restoreVelDelta` je přeskočí.
+ */
+export type SavedVel = {
+  vx: Float64Array;
+  vy: Float64Array;
+  rs: Float64Array;
+};
+
+/**
+ * Pro β: ulož aktuální linvel/angvel non-pinned pixelů, set 0/0 v Rapier body. Po `world.step()`
+ * voláme `restoreVelDelta(world, saved)`, která čte novou linvel/angvel (= delta z constraint
+ * impulses, protože před stepem byla 0) a přičte k saved hodnotám.
+ *
+ * Důvod: Rapier `step()` integruje `pos += vel·dt` interně. Pokud chceme, aby drift udělal
+ * **náš** symplektický Euler (sezení 3: rapier gravity-side broken), musíme Rapieru
+ * "ukrást" pos drift tím, že mu dáme vel=0. Constraint solver pak řeší **jen impulses**
+ * (joint pole, contact reactions), které vrátí body do platného stavu — to chceme.
+ */
+export function saveZeroVel(world: World): SavedVel {
+  const n = world.pixels.length;
+  const vx = new Float64Array(n);
+  const vy = new Float64Array(n);
+  const rs = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = world.pixels[i]!;
+    if (p.pinned) continue;
+    const v = p.body.linvel();
+    vx[i] = v.x;
+    vy[i] = v.y;
+    rs[i] = p.body.angvel();
+    p.body.setLinvel({ x: 0, y: 0 }, true);
+    p.body.setAngvel(0, true);
+  }
+  return { vx, vy, rs };
+}
+
+/**
+ * Po `world.step()` přečti novou linvel/angvel (= delta z constraint impulses) a přičti ke
+ * snapshot. Výsledek vrací k normálnímu nenulovému stavu pro další gravity kick.
+ *
+ * Edge case: pokud `world.step()` "spí" pinned pixel a auto-clearuje vel, naše saved hodnoty
+ * pro pinned jsou 0 (skip v save), takže addback je no-op. OK.
+ */
+export function restoreVelDelta(world: World, saved: SavedVel): void {
+  const n = world.pixels.length;
+  for (let i = 0; i < n; i++) {
+    const p = world.pixels[i]!;
+    if (p.pinned) continue;
+    const v = p.body.linvel();
+    p.body.setLinvel({ x: saved.vx[i]! + v.x, y: saved.vy[i]! + v.y }, true);
+    p.body.setAngvel(saved.rs[i]! + p.body.angvel(), true);
+  }
+}

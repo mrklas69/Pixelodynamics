@@ -12,14 +12,22 @@ import type { Pixel } from '../types';
 
 /**
  * Integrační mód určuje, jakým způsobem se aktualizují pos/vel pixelů:
- *   - `manual`  jen náš symplektický Euler (gravitace pozadí); Rapier step() se nevolá.
- *               Stav fáze 2.
- *   - `rapier`  jen `world.step(dt)` — Rapier interní integrátor + constraints/contacts.
- *               Pro experimenty E1–E4: měříme co Rapier dělá sám o sobě.
- *   - `hybrid`  manuální gravitace POSTERIORITY + `world.step(dt)`.
- *               Pro E5: zjišťujeme drift ∑P/∑L kombinovaného loopu.
+ *   - `manual`        jen náš symplektický Euler (gravitace pozadí); Rapier step() se nevolá.
+ *                     Stav fáze 2 — bez constraintů/kontaktů.
+ *   - `rapier`        jen `world.step(dt)` — Rapier interní integrátor + constraints/contacts.
+ *                     Pro experimenty E1–E4 (G=0): měříme co Rapier dělá sám o sobě.
+ *   - `hybrid-naive`  full manual stepGravity + full Rapier step. Dvojitá integrace pos
+ *                     drift. Empiricky broken (sezení 3, E5 vs E5m: ∑P/∑L drift 10⁴×
+ *                     horší kvůli f32 bridge). Zachováno pro reprodukci E5.
+ *   - `hybrid-α`      Velocity-Verlet split: manual jen `v += a·dt` (kick), Rapier dělá
+ *                     `pos += v·dt` (drift) + constraint resolution. Standardní pattern.
+ *                     Joint solver má autoritu nad pos.
+ *   - `hybrid-β`      Save-zero-restore vel: manual full kick+drift, pak před Rapier step()
+ *                     uložíme/vynulujeme linvel+angvel, Rapier integruje pos s vel=0
+ *                     (žádný posun) ale solver vrátí impulse z constraintů → po stepu
+ *                     přečteme delta a přičteme k uložené vel. Drift má autoritu manual.
  */
-export type IntegrationMode = 'manual' | 'rapier' | 'hybrid';
+export type IntegrationMode = 'manual' | 'rapier' | 'hybrid-naive' | 'hybrid-α' | 'hybrid-β';
 
 export type PresetAPI = {
   /** Vrátí gravitační konstantu G (parametr SETTINGS). */
@@ -114,13 +122,14 @@ export const PRESETS: Preset[] = [
     },
     stopAtTime: 10,
   },
+  ...e8Variants(),
   {
     id: 'e5',
     name: 'E5 — Hybrid gravity + Rapier',
     description:
       '12 pixelů ve volné konfiguraci, manuální gravitace + Rapier step (no joints). Měříme: drift ∑P/∑L oproti čistě manuálnímu loopu (sezení 2).',
     setup: (api) => {
-      api.setIntegration('hybrid');
+      api.setIntegration('hybrid-naive');
       api.setG(1.0);
       e5Spawn(api);
     },
@@ -313,6 +322,65 @@ function e7Spawn(api: PresetAPI): void {
       api.spawn(col * spacing - offsetX, row * spacing - offsetY, 0, 0, 0, 0);
     }
   }
+}
+
+/**
+ * E8 varianty — sdílený spawn (pinned attractor + 2 free + joint), liší se jen integračním
+ * módem. Stejný spawn umožňuje bit-by-bit porovnání modelshotů mezi módy.
+ *
+ * Setup: pinned M=10 na (0,0), free m=1 na (R±0.5, 0) s tečnou v_circ=√(GM/R)≈1.414, R=5.
+ * Joint mezi free pixely (sdílená hrana). Plummer ε + pair extent dají mírnou precesi
+ * — orbit cca 1.3× za 30 s. Drift mezi módy je relativní k pure-rapier baseline (E8r).
+ */
+function e8Spawn(api: PresetAPI): void {
+  api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
+  const R = 5;
+  const M = 10;
+  const G = 1;
+  const vCirc = Math.sqrt((G * M) / R);
+  api.setG(G);
+  api.spawn(0, 0, 0, 0, 0, 0, M, true);
+  const a = api.spawn(R - 0.5, 0, 0, vCirc, 0, 0, 1, false);
+  const b = api.spawn(R + 0.5, 0, 0, vCirc, 0, 0, 1, false);
+  api.connect(a, b);
+}
+
+function e8Variants(): Preset[] {
+  return [
+    {
+      id: 'e8r',
+      name: 'E8r — Rapier baseline (joint orbit)',
+      description:
+        'Pure rapier mode (gravita přes addForce — broken pro orbital, ale joint solver trusted po E3-tune). REFERENCE pro porovnání hybrid-α/β.',
+      setup: (api) => {
+        api.setIntegration('rapier');
+        e8Spawn(api);
+      },
+      stopAtTime: 30,
+    },
+    {
+      id: 'e8a',
+      name: 'E8α — Velocity-Verlet split',
+      description:
+        'hybrid-α: manual jen kick (v += a·dt), Rapier dělá pos drift + joint solver. Standardní velocity-Verlet split. Měříme drift pos/KE/∑P vs E8r.',
+      setup: (api) => {
+        api.setIntegration('hybrid-α');
+        e8Spawn(api);
+      },
+      stopAtTime: 30,
+    },
+    {
+      id: 'e8b',
+      name: 'E8β — Save-zero-restore',
+      description:
+        'hybrid-β: manual full kick+drift, pak Rapier step s vel=0 (jen constraint impulses) → addback delta. Drift má manuální Euler. Měříme proti E8r/E8α.',
+      setup: (api) => {
+        api.setIntegration('hybrid-β');
+        e8Spawn(api);
+      },
+      stopAtTime: 30,
+    },
+  ];
 }
 
 /** Sdílený spawn 12 pixelů v D4 symetrii (E5 a E5m musí mít bit-identický setup). */

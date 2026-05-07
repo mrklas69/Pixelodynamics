@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { World } from '../sim/physics';
-  import { stepGravity } from '../sim/gravity';
+  import { World, saveZeroVel, restoreVelDelta } from '../sim/physics';
+  import { stepGravity, stepGravityKickOnly } from '../sim/gravity';
   import { computeDiagnostics, computeCentroid } from '../sim/diagnostics';
   import { computeFacts, emptyFacts, type Facts, type Champion } from '../sim/facts';
-  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR } from '../sim/params';
+  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, SKIP_RAPIER_IF_NO_JOINTS } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
   import { createFixedJoint, removeJoint } from '../sim/joints';
   import { playSpawn } from '../audio/sfx';
@@ -45,7 +45,10 @@
 
   // EXPERIMENT STATE
   let paused = $state(false);
-  let integration = $state<IntegrationMode>('manual'); // default: stávající chování fáze 2
+  // Default `hybrid-α`: bez jointů γ flag (SKIP_RAPIER_IF_NO_JOINTS) preskočí Rapier step
+  // → ekvivalent pure manual módu (sezení 9 ověřeno: ∑E drift 0.04%/30s s jointem).
+  // Jakmile user manuálně vytvoří joint, hybrid-α se aktivuje automaticky bez změny módu.
+  let integration = $state<IntegrationMode>('hybrid-α');
   let currentPreset = $state<Preset | null>(null);
   let stopAtTime: number | null = null; // null = neomezeno
   let stoppedAtTime = false; // už auto-stop proběhl pro current preset?
@@ -425,14 +428,63 @@
           accumulator += realDt;
           let steps = 0;
           while (accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
-            if (integration === 'manual' || integration === 'hybrid') {
-              for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
-                const r = stepGravity(w, { G, eps: GRAVITY_EPSILON, useGrid, cutoffFactor }, SUB_DT);
-                lastPE = r.pe;
-              }
-            }
-            if (integration === 'rapier' || integration === 'hybrid') {
-              w.step(FIXED_DT);
+            const gp = { G, eps: GRAVITY_EPSILON, useGrid, cutoffFactor };
+            // γ flag: pokud nejsou aktivní jointy, hybrid-* shrnout na pure manual.
+            // Bypass Rapier step → konzervace ∑P/∑L na úroveň pure manual módu.
+            const skipRapier = SKIP_RAPIER_IF_NO_JOINTS && w.joints.length === 0;
+
+            switch (integration) {
+              case 'manual':
+                for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
+                  lastPE = stepGravity(w, gp, SUB_DT).pe;
+                }
+                break;
+
+              case 'rapier':
+                w.step(FIXED_DT);
+                break;
+
+              case 'hybrid-naive':
+                // Dvojitá integrace — full manual + full Rapier. Reprodukce E5 (broken,
+                // historicky reference). NE doporučeno pro orbit dynamiku.
+                for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
+                  lastPE = stepGravity(w, gp, SUB_DT).pe;
+                }
+                if (!skipRapier) w.step(FIXED_DT);
+                break;
+
+              case 'hybrid-α':
+                if (skipRapier) {
+                  // γ optimalizace: bez constraintů degenerujeme na pure manual (full
+                  // kick+drift). Bez Rapier driftu by kick-only jen akumulovala vel
+                  // a pixely by se nehnuly.
+                  for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
+                    lastPE = stepGravity(w, gp, SUB_DT).pe;
+                  }
+                } else {
+                  // Velocity-Verlet split: manual jen kick (v += a·dt), drift dělá
+                  // Rapier `world.step()`. Substepy gravity se aplikují všechny před
+                  // jediným Rapier krokem — gravity je integrovaná SUBSTEPS× jemněji
+                  // než pos drift, což snižuje truncation error close-encounteru.
+                  for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
+                    lastPE = stepGravityKickOnly(w, gp, SUB_DT).pe;
+                  }
+                  w.step(FIXED_DT);
+                }
+                break;
+
+              case 'hybrid-β':
+                // Save-zero-restore: manual full kick+drift, pak Rapier step s vel=0
+                // (pos drift =0, jen constraint impulses) → addback delta.
+                for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
+                  lastPE = stepGravity(w, gp, SUB_DT).pe;
+                }
+                if (!skipRapier) {
+                  const saved = saveZeroVel(w);
+                  w.step(FIXED_DT);
+                  restoreVelDelta(w, saved);
+                }
+                break;
             }
             simTime += FIXED_DT;
             accumulator -= FIXED_DT;
@@ -665,6 +717,16 @@
       <input type="range" min="3" max="12" step="0.5" bind:value={cutoffFactor} />
       <output>{cutoffFactor.toFixed(1)}·ε</output>
     </label>
+    <label class="select" title="Integrační mód. Live override; preset reset to vrátí.">
+      <span>mód</span>
+      <select bind:value={integration}>
+        <option value="manual">manual</option>
+        <option value="rapier">rapier</option>
+        <option value="hybrid-naive">hybrid-naive</option>
+        <option value="hybrid-α">hybrid-α (Verlet split)</option>
+        <option value="hybrid-β">hybrid-β (save-zero)</option>
+      </select>
+    </label>
     <button class="reset" onclick={resetScene}>Reset scény</button>
 
     <h2>COMMANDS</h2>
@@ -807,6 +869,26 @@
     accent-color: #6f8ec1;
   }
   .slider output { font-variant-numeric: tabular-nums; color: #cfd6e0; text-align: right; }
+  .select {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 4px 8px;
+    margin: 0 0 10px 0;
+    font-size: 12px;
+  }
+  .select span { color: #7a8390; text-align: left; }
+  .select select {
+    grid-column: 1 / -1;
+    width: 100%;
+    background: #14181f;
+    color: #cfd6e0;
+    border: 1px solid #2a3142;
+    border-radius: 3px;
+    padding: 3px 6px;
+    font-size: 12px;
+    font-family: inherit;
+  }
   button {
     width: 100%;
     border: 1px solid #2a3142;

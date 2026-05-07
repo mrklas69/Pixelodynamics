@@ -62,19 +62,25 @@ type CompositeObject = {
 
 **Otevřené pro fázi 3:** Až přijdou joints + kolize, manuální integrátor sám nestačí. Buď hybrid (gravitace ručně, joints/kolize Rapierem), nebo akceptovat drift až bude přítomna disipace z kolizí (která je beztak silnější).
 
-### Hybrid orchestrace pro fázi 3 — tři varianty
+### Hybrid orchestrace pro fázi 3 — tři varianty (→ DONE sezení 9)
 
 **Kontext (sezení 3):** E5 vs. E5m empiricky potvrdilo, že naivní `manuální stepGravity + Rapier.step()` integruje pohyb **dvakrát** (manual drift + Rapier drift), simulace běží zhruba 2× rychleji než pure manual. Plus Rapier WASM bridge ve f32 → ∑P/∑L drift 10⁴× horší (1e-12 vs. 1e-15 v pure manual). Naive hybrid je nepoužitelný.
 
-**Update (sezení 8):** Po E3-tune víme, že rapier joint solver je po `canSleep=false` + `solverIterations=16` + `pgsIterations=4` použitelný jako **trusted reference** pro joint dynamiku — drift po 10s je 0.01% na ω, ∑P k f32 epsilon. Joint-side dissipace v rapieru NENÍ problém; problém zůstává **gravity-side** integrace v rapieru (sezení 2). α/β/γ proto má za cíl: **nechat rapier řešit jointy, ale gravity kick aplikovat manuálním Eulerem**.
+**Update (sezení 8):** Po E3-tune víme, že rapier joint solver je po `canSleep=false` + `solverIterations=16` + `pgsIterations=4` použitelný — drift po 10s je 0.01% na ω. Joint-side dissipace v rapieru NENÍ problém; problém zůstává **gravity-side** integrace v rapieru (sezení 2).
 
-Tři architektonické cesty:
+**Verdikt (sezení 9, E8 sweep):**
 
-- **(α) Velocity-Verlet split:** `stepGravity` dělá jen `v += a·dt` (kick); pos drift udělá Rapier `step()` jednou per frame. Standardní pattern. Risk: f32 drift v Rapieru se přenese na pos všech pixelů, ne jen na ty s constraints.
-- **(β) Save-zero-restore vel:** manual dělá kick+drift normálně. Před `Rapier.step()` linvel uložíme stranou, vynulujeme → Rapier neposune pos (jen vyřeší constraints) → po stepu čteme delta linvel z constraint impulses, přičteme k uloženým. Komplexní, ale Rapier neovlivní kinematiku. Risk: konfliktní logika v Rapier solveru (může spoléhat na nenulovou vel).
-- **(γ) Rapier step jen když existují aktivní jointy/kontakty:** v čistě orbitálních fázích (před slepenci) bypass Rapier. Při fázi 3 detekce zapne `step()`. Nejjednodušší, ale "bimodální" chování — výkonový profil mění se stavem. Risk: přepnutí může mít edge cases (jeden frame jointy, druhý ne).
+- **(α) Velocity-Verlet split — winner.** ∑E drift 0.04 %/30 s, joint distance preserve, rs=0.32 (gravita-induced precesní moment). Etablováno jako default `hybrid-α` mode.
+- **(β) Save-zero-restore — broken.** ∑E drift 13 %/30 s + rs ≈ 0 (pair se netočí). Nulování vel před Rapier stepem maskuje gravitační stress pro joint solver — nedá tidal torque. Plus position-based Baumgarte přes f32 round-trip dissipuje energii. Kód zachován pro reprodukovatelnost, ale empiricky vyloučen.
+- **(γ) Conditional Rapier step — orthogonal flag.** Implementováno jako `SKIP_RAPIER_IF_NO_JOINTS=true` v params.ts. Když `world.joints.length === 0`, hybrid-α/β degeneruje na pure manual (∑P/∑L f64 ulp). Auto-aktivuje se s prvním jointem. Žádné per-mode UI — jen flag.
 
-**Co rozhodne volbu:** preset E8 s G=1 + 2 free pixely + 1 pinned attractor + FixedJoint mezi 2 free. Naměřit pos/KE/∑P drift po N krocích pro každou variantu vs. analytical (eliptická orbit) nebo pure rapier baseline (ten je teď trusted reference díky sezení 8).
+### Rapier "broken pro orbit" je broader princip než jen integrátor (sezení 9)
+
+E8r modelshot odhalil, že pure rapier mode v naší architektuře **nezavolá `stepGravity` vůbec**. Naše párová gravita = external force, kterou Rapier nezná. Rapier global gravity = 0 (nastaveno v `init`). Free pair v E8r tedy letí balisticky, ne v orbitě.
+
+To není "bug" — je to design rozhodnutí. Pure rapier mode = "co Rapier dělá sám" pro experimenty E1–E4 (G=0 setup). Pro E8r jsme ho vědomě zneužili a zjistili limit. **Pro orbit dynamics existuje jen manual + α (ne β, ne pure rapier).**
+
+**Lekce (memory candidate):** Před spuštěním nového presetu **mental run-through "co každý mód v daném setupu udělá"**. Ne až modelshot. Sezení 4 censure (sanity check matic) generalizuje na **algoritmický + setup sanity check**.
 
 ### Rapier sleep mode jako anti-feature (sezení 8)
 
