@@ -9,15 +9,45 @@
 //   - Symplektický Euler zachovává hybnost na úrovni float roundoff a pro radiální
 //     síly zachovává úhlovou hybnost také.
 //
-// Až přijde fáze 3 (joints, kolize), přejdeme zpět na Rapier step() — kontakty pak
-// fyzicky brání nejhorším close-encounter slingshotům, takže softening problém zmizí.
+// Force eval má dvě varianty:
+//   - naivní O(N²) — referenční baseline, používá se pro N malé nebo když
+//     `GRAVITY_USE_GRID = false` (kontrolní srovnání).
+//   - uniform spatial grid — buňky o velikosti cutoff, party jen v 3×3 sousedství,
+//     očekávané ~O(N) pro homogenní rozložení.
 
 import type { World } from './physics';
+import { GRAVITY_CUTOFF_FACTOR } from './params';
 
 export type GravityParams = {
   G: number;
   eps: number;
+  /**
+   * true = uniform spatial grid s hard cutoff 5·ε ≈ 7.5 U (produkční default).
+   * false = naivní O(N²) všech dvojic — nutné pro experimenty s párovou interakcí
+   * na vzdálenostech > cutoff (např. L1 v E6).
+   */
+  useGrid: boolean;
 };
+
+// Module-level scratch — recyklujeme buckety mezi voláními, aby GC nezdroj.
+// `gridBuckets`: cell key → array indexů pixelů. Klíč = `cy * STRIDE + cx`
+// po offset (kódujeme znaménko). STRIDE musí být >> max počet buněk v ose.
+const STRIDE = 65536;
+const OFFSET = 32768;
+const gridBuckets = new Map<number, number[]>();
+const bucketPool: number[][] = [];
+
+function clearGrid(): void {
+  for (const arr of gridBuckets.values()) {
+    arr.length = 0;
+    bucketPool.push(arr);
+  }
+  gridBuckets.clear();
+}
+
+function takeBucket(): number[] {
+  return bucketPool.pop() ?? [];
+}
 
 export function stepGravity(world: World, p: GravityParams, dt: number): { pe: number } {
   const pixels = world.pixels;
@@ -32,6 +62,7 @@ export function stepGravity(world: World, p: GravityParams, dt: number): { pe: n
   const m = new Float64Array(n);
   const angles = new Float64Array(n);
   const omegas = new Float64Array(n);
+  const pinned = new Uint8Array(n); // 1 = nehybný (skip kick+drift+write-back)
   for (let i = 0; i < n; i++) {
     const pixel = pixels[i]!;
     const t = pixel.body.translation();
@@ -43,47 +74,28 @@ export function stepGravity(world: World, p: GravityParams, dt: number): { pe: n
     m[i] = pixel.m;
     angles[i] = pixel.body.rotation();
     omegas[i] = pixel.body.angvel();
+    pinned[i] = pixel.pinned ? 1 : 0;
   }
 
   // Akumulace gravitačních zrychlení (a, ne F — F dělíme hmotnostmi v místě).
   const ax = new Float64Array(n);
   const ay = new Float64Array(n);
-  let peTotal = 0;
+  const peRef = { pe: 0 };
 
   if (p.G !== 0 && n >= 2) {
-    const eps2 = p.eps * p.eps;
-    for (let i = 0; i < n - 1; i++) {
-      const xi = px[i]!;
-      const yi = py[i]!;
-      const mi = m[i]!;
-      let axi = 0;
-      let ayi = 0;
-      for (let j = i + 1; j < n; j++) {
-        const dx = px[j]! - xi;
-        const dy = py[j]! - yi;
-        const r2 = dx * dx + dy * dy + eps2;
-        const r = Math.sqrt(r2);
-        const invR3 = 1 / (r2 * r);
-        const mj = m[j]!;
-        const f = p.G * mi * mj * invR3;
-        const fxij = f * dx;
-        const fyij = f * dy;
-        // Newton 3: opačná zrychlení s opačným znaménkem.
-        axi += fxij / mi;
-        ayi += fyij / mi;
-        ax[j] = ax[j]! - fxij / mj;
-        ay[j] = ay[j]! - fyij / mj;
-        // PE souhlasná s force kernelem: U = -G·m·m / sqrt(r² + ε²).
-        peTotal -= (p.G * mi * mj) / r;
-      }
-      ax[i] = ax[i]! + axi;
-      ay[i] = ay[i]! + ayi;
+    if (p.useGrid) {
+      accumulateForcesGrid(p, n, px, py, m, ax, ay, peRef);
+    } else {
+      accumulateForcesNaive(p, n, px, py, m, ax, ay, peRef);
     }
   }
 
   // Symplektický Euler: nejprve kick (v += a·dt), pak drift (x += v·dt).
   // Pořadí kick-drift garantuje exact symetrii ∑P (Newton 3) a zachování ∑L pro radiální síly.
+  // Pinned pixely přeskakujeme — působí gravitací na ostatní (force kernel je započítal),
+  // ale jejich vlastní pos/vel je fixní.
   for (let i = 0; i < n; i++) {
+    if (pinned[i]) continue;
     vx[i] = vx[i]! + ax[i]! * dt;
     vy[i] = vy[i]! + ay[i]! * dt;
     px[i] = px[i]! + vx[i]! * dt;
@@ -92,13 +104,153 @@ export function stepGravity(world: World, p: GravityParams, dt: number): { pe: n
     angles[i] = angles[i]! + omegas[i]! * dt;
   }
 
-  // Zápis zpět do Rapier RigidBody — wakeUp=true, abychom je drželi probuzené.
+  // Zápis zpět do Rapier RigidBody — pro pinned vynecháme úplně, abychom nedělali
+  // round-trip f64 → f32 → f64, který by byl jediný zdroj numerického posunu.
   for (let i = 0; i < n; i++) {
+    if (pinned[i]) continue;
     const body = pixels[i]!.body;
     body.setLinvel({ x: vx[i]!, y: vy[i]! }, true);
     body.setTranslation({ x: px[i]!, y: py[i]! }, true);
     body.setRotation(angles[i]!, true);
   }
 
-  return { pe: peTotal };
+  return { pe: peRef.pe };
+}
+
+/** Naivní O(N²) — všechny dvojice. Reference baseline. */
+function accumulateForcesNaive(
+  p: GravityParams,
+  n: number,
+  px: Float64Array,
+  py: Float64Array,
+  m: Float64Array,
+  ax: Float64Array,
+  ay: Float64Array,
+  peRef: { pe: number },
+): void {
+  const eps2 = p.eps * p.eps;
+  let pe = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const xi = px[i]!;
+    const yi = py[i]!;
+    const mi = m[i]!;
+    let axi = 0;
+    let ayi = 0;
+    for (let j = i + 1; j < n; j++) {
+      const dx = px[j]! - xi;
+      const dy = py[j]! - yi;
+      const r2 = dx * dx + dy * dy + eps2;
+      const r = Math.sqrt(r2);
+      const invR3 = 1 / (r2 * r);
+      const mj = m[j]!;
+      const f = p.G * mi * mj * invR3;
+      const fxij = f * dx;
+      const fyij = f * dy;
+      axi += fxij / mi;
+      ayi += fyij / mi;
+      ax[j] = ax[j]! - fxij / mj;
+      ay[j] = ay[j]! - fyij / mj;
+      pe -= (p.G * mi * mj) / r;
+    }
+    ax[i] = ax[i]! + axi;
+    ay[i] = ay[i]! + ayi;
+  }
+  peRef.pe = pe;
+}
+
+/**
+ * Uniform spatial grid. Cell size = cutoff = `eps × CUTOFF_FACTOR`. Pro každou buňku
+ * iteruj 3×3 sousedství; uvnitř páruj pixely s `j > i` (dedup) a počítej jen pokud
+ * `r ≤ cutoff`. Hard cutoff: za hranicí force = 0.
+ *
+ * Konzervace:
+ *  - ∑P exact (každý pár přidá Newton 3 symetricky).
+ *  - ∑L exact pro radiální páry (gravitační síla je radiální).
+ *  - KE má malé skoky při krossování cutoffu (síla nespojitá v r=cutoff). Pro
+ *    orbital scénáře neviditelné, pro „rozprostřený plyn" typicky < 0.1 % drift /s.
+ */
+function accumulateForcesGrid(
+  p: GravityParams,
+  n: number,
+  px: Float64Array,
+  py: Float64Array,
+  m: Float64Array,
+  ax: Float64Array,
+  ay: Float64Array,
+  peRef: { pe: number },
+): void {
+  const cutoff = p.eps * GRAVITY_CUTOFF_FACTOR;
+  const cellSize = cutoff;
+  const invCell = 1 / cellSize;
+  const cutoff2 = cutoff * cutoff;
+  const eps2 = p.eps * p.eps;
+  let pe = 0;
+
+  clearGrid();
+  for (let i = 0; i < n; i++) {
+    const cx = Math.floor(px[i]! * invCell) + OFFSET;
+    const cy = Math.floor(py[i]! * invCell) + OFFSET;
+    // Pixel zcela mimo grid range (prakticky nenastane, ale safety) → padne do edge buňky.
+    const cxc = cx < 0 ? 0 : cx >= STRIDE ? STRIDE - 1 : cx;
+    const cyc = cy < 0 ? 0 : cy >= STRIDE ? STRIDE - 1 : cy;
+    const k = cyc * STRIDE + cxc;
+    let arr = gridBuckets.get(k);
+    if (!arr) {
+      arr = takeBucket();
+      gridBuckets.set(k, arr);
+    }
+    arr.push(i);
+  }
+
+  // Iterace přes každou neprázdnou buňku. Pro každou projdi 3×3 sousedství.
+  // Dedup: pár (i, j) započítáme jen když `i < j`. To zajistí, že pár je započítán
+  // přesně jednou, ať jsou v jakémkoliv ze 9 vztahů cell-to-neighbor.
+  for (const [key, cellPixels] of gridBuckets) {
+    const cy = Math.floor(key / STRIDE);
+    const cx = key - cy * STRIDE;
+
+    for (let dy = -1; dy <= 1; dy++) {
+      const ny = cy + dy;
+      if (ny < 0 || ny >= STRIDE) continue;
+      for (let dx = -1; dx <= 1; dx++) {
+        const nx = cx + dx;
+        if (nx < 0 || nx >= STRIDE) continue;
+        const nKey = ny * STRIDE + nx;
+        const neighbors = gridBuckets.get(nKey);
+        if (!neighbors) continue;
+
+        // Same-cell: uvnitř `cellPixels` páruj jen i<j; cell-to-neighbor stejné pravidlo
+        // bude buď redundantní (když je neighbor stejná buňka) nebo asymetrické.
+        // Jednotná pravidlo `i < j` přes všechny páry je konzistentní.
+        for (let a = 0; a < cellPixels.length; a++) {
+          const i = cellPixels[a]!;
+          const xi = px[i]!;
+          const yi = py[i]!;
+          const mi = m[i]!;
+          for (let b = 0; b < neighbors.length; b++) {
+            const j = neighbors[b]!;
+            if (j <= i) continue;
+            const ddx = px[j]! - xi;
+            const ddy = py[j]! - yi;
+            const r2raw = ddx * ddx + ddy * ddy;
+            if (r2raw > cutoff2) continue;
+            const r2 = r2raw + eps2;
+            const r = Math.sqrt(r2);
+            const invR3 = 1 / (r2 * r);
+            const mj = m[j]!;
+            const f = p.G * mi * mj * invR3;
+            const fxij = f * ddx;
+            const fyij = f * ddy;
+            ax[i] = ax[i]! + fxij / mi;
+            ay[i] = ay[i]! + fyij / mi;
+            ax[j] = ax[j]! - fxij / mj;
+            ay[j] = ay[j]! - fyij / mj;
+            pe -= (p.G * mi * mj) / r;
+          }
+        }
+      }
+    }
+  }
+
+  peRef.pe = pe;
 }

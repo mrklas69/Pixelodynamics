@@ -37,6 +37,7 @@ export class World {
       Math.random() * Math.PI * 2,
       (Math.random() - 0.5) * 2 * SPAWN_ANGVEL_MAX,
       1,
+      false,
     );
   }
 
@@ -44,6 +45,7 @@ export class World {
    * Deterministický spawn — všechny atributy explicitní. Používá se v presetech, aby
    * experimenty byly reprodukovatelné. `m` je strukturně přítomné, ale Rapier mass
    * je odvozená z density × area; vlastní m používá náš manuální integrátor.
+   * `pinned=true` udělá z pixelu nehybnou hmotu (působí gravitací, sama se nepohne).
    */
   spawnPixelExact(
     x: number,
@@ -53,6 +55,7 @@ export class World {
     r: number,
     rs: number,
     m: number,
+    pinned: boolean = false,
   ): Pixel {
     const desc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(x, y)
@@ -68,7 +71,7 @@ export class World {
       .setDensity(1);
     this.rapier.createCollider(colliderDesc, body);
 
-    const pixel: Pixel = { id: nextId++, body, m };
+    const pixel: Pixel = { id: nextId++, body, m, pinned };
     this.pixels.push(pixel);
     return pixel;
   }

@@ -27,8 +27,25 @@ export type PresetAPI = {
   setH: (h: number) => void;
   /** Přepne integrační mód (viz `IntegrationMode`). */
   setIntegration: (mode: IntegrationMode) => void;
-  /** Spawn pixelu s plně explicitními atributy. */
-  spawn: (x: number, y: number, vx: number, vy: number, r: number, rs: number, m?: number) => void;
+  /**
+   * Přepne mezi uniform spatial grid (true, default) a naivní O(N²) gravitou.
+   * Naivní je nutná pro experimenty s párovou interakcí > cutoff (~7.5 U).
+   */
+  setUseGrid: (b: boolean) => void;
+  /**
+   * Spawn pixelu s plně explicitními atributy.
+   * `pinned=true` udělá z pixelu nehybnou hmotu — působí gravitací, sama se nepohne.
+   */
+  spawn: (
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    r: number,
+    rs: number,
+    m?: number,
+    pinned?: boolean,
+  ) => void;
 };
 
 export type Preset = {
@@ -105,7 +122,81 @@ export const PRESETS: Preset[] = [
     },
     stopAtTime: 60,
   },
+  {
+    id: 'e6',
+    name: 'E6 — Lagrange L1',
+    description:
+      '30 pixelů (m=1) PINNED v (-10, 0) → cluster m=30, 1 pixel PINNED v (+10, 0), volný test pixel na L1 (Plummer-corrected, ≈+7.43). Cluster + singlet jsou pinned, jinak by se stáhli a problém zanikl. Naive gravita (grid cutoff 7.5 U). L1 je SADDLE (τ ≈ 4 s) — z f32 ulp drift po 30 s ~0.5 mU = pod 1 px, po 60 s už nelineární kollaps.',
+    setup: (api) => {
+      api.setIntegration('manual');
+      api.setG(1.0);
+      api.setUseGrid(false); // grid hard cutoff (5·ε = 7.5 U) by odřízl 12.6 U cluster-test gravitu
+      e6Spawn(api);
+    },
+    stopAtTime: 30,
+  },
 ];
+
+/**
+ * E6 spawn: cluster + singlet + test pixel přesně na L1 pro Plummer kernel.
+ *
+ * L1 podmínka (mezi M1 a M2 v ose, vzdálenost D, softening ε):
+ *   M1 / (r² + ε²)^{3/2}  =  M2 / ((D-r)² + ε²)^{3/2}
+ * kde r je vzdálenost od M1. Pro klasický 1/r² (ε=0) by bylo r = D / (1 + √(M2/M1));
+ * s Plummer ε ≠ 0 řešíme bisekcí. Konvergence: 60 iter dá ulp-přesnou polohu.
+ */
+function e6Spawn(api: PresetAPI): void {
+  const D = 20;
+  const clusterX = -10;
+  const singletX = 10;
+  const eps = 1.5; // shoduje se s GRAVITY_EPSILON v params.ts
+  const M1 = 30;
+  const M2 = 1;
+
+  // Cluster: 30 PINNED pixelů na jednom bodě. m_cluster total = 30.
+  for (let i = 0; i < M1; i++) api.spawn(clusterX, 0, 0, 0, 0, 0, 1, true);
+  // Singlet: PINNED, m=1. Zaručuje statický binární potenciál.
+  api.spawn(singletX, 0, 0, 0, 0, 0, 1, true);
+
+  // Plummer force per unit mass na vzdálenosti r od bodu hmoty M je G·M·r / (r² + ε²)^{3/2}.
+  // L1 mezi M1 (vzdálenost r1) a M2 (vzdálenost r2 = D - r1):
+  //   M1·r1 / (r1²+ε²)^{3/2}  =  M2·r2 / (r2²+ε²)^{3/2}
+  //
+  // Pro Plummer kernel má rovnice **tři** kořeny v (0, D):
+  //   1) r ≈ ε² · M2 / (M1·D²)  — falešný L-bod uvnitř Plummer ε na cluster straně
+  //   2) r ≈ klasický L1         — fyzický L1 (chtěný)
+  //   3) blízko D                 — falešný L-bod na singlet straně
+  // Klasický 1/r² má jen kořen 2). Bisekci proto musíme limitovat na okolí klasické
+  // hodnoty, jinak konverguje k jednomu z falešných kořenů.
+  const rClassical = D / (1 + Math.sqrt(M2 / M1));
+  const eps2 = eps * eps;
+  // Rozsah ±2ε kolem klasické hodnoty bezpečně odděluje pravý L1 od falešných.
+  let lo = Math.max(1e-3, rClassical - 2 * eps);
+  let hi = Math.min(D - 1e-3, rClassical + 2 * eps);
+  // Predikát: f(lo) > 0 (cluster pull dominant), f(hi) < 0 (singlet pull dominant).
+  // Pokud f(mid) > 0 → mid leží v "lo" oblasti → posun lo = mid.
+  for (let i = 0; i < 80; i++) {
+    const r = (lo + hi) / 2;
+    const r2 = D - r;
+    const f1 = (M1 * r) / Math.pow(r * r + eps2, 1.5);
+    const f2 = (M2 * r2) / Math.pow(r2 * r2 + eps2, 1.5);
+    if (f1 > f2) lo = r;
+    else hi = r;
+  }
+  const r = (lo + hi) / 2;
+
+  // Sanity check: net force na test pos by měla být <= ulp roundoff.
+  const r2 = D - r;
+  const f1 = (M1 * r) / Math.pow(r * r + eps2, 1.5);
+  const f2 = (M2 * r2) / Math.pow(r2 * r2 + eps2, 1.5);
+  // Pomáhá při nesouladu params (např. změna ε): occurs in dev, neházet hard error v produkci.
+  if (Math.abs(f1 - f2) > 1e-12) {
+    console.warn(`E6 L1 bisection residual ${(f1 - f2).toExponential(3)} (>1e-12)`);
+  }
+
+  // Test pixel: free (default pinned=false).
+  api.spawn(clusterX + r, 0, 0, 0, 0, 0, 1);
+}
 
 /** Sdílený spawn 12 pixelů v D4 symetrii (E5 a E5m musí mít bit-identický setup). */
 function e5Spawn(api: PresetAPI): void {
