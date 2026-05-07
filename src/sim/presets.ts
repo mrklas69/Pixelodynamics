@@ -8,6 +8,7 @@
 // auto-exportuje do clipboardu jako JSON modelshot.
 
 import type { World } from './physics';
+import type { Pixel } from '../types';
 
 /**
  * Integrační mód určuje, jakým způsobem se aktualizují pos/vel pixelů:
@@ -33,7 +34,8 @@ export type PresetAPI = {
    */
   setUseGrid: (b: boolean) => void;
   /**
-   * Spawn pixelu s plně explicitními atributy.
+   * Spawn pixelu s plně explicitními atributy. Vrací `Pixel` handle, aby preset mohl
+   * pixel referencovat (například pro `connect`).
    * `pinned=true` udělá z pixelu nehybnou hmotu — působí gravitací, sama se nepohne.
    */
   spawn: (
@@ -45,7 +47,20 @@ export type PresetAPI = {
     rs: number,
     m?: number,
     pinned?: boolean,
-  ) => void;
+  ) => Pixel;
+  /**
+   * Vytvoří FixedJoint mezi dvěma pixely (anchor = midpoint mezi centry).
+   * Používá se v presetech, které mají testovat constraint physiku (E3+).
+   */
+  connect: (a: Pixel, b: Pixel) => void;
+  /**
+   * Tuning Rapier solveru pro experimenty (E3t/E3s). Hodnoty platí jen v rámci
+   * presetu — `applyPreset` přes `resetScene` nezruší integration parameters,
+   * takže pokud preset nezavolá `tuneRapier`, předchozí nastavení by přetrvalo.
+   * Pro robustnost: každý preset, který se Rapieru dotýká, by měl explicitně
+   * tuneRapier zavolat (aspoň defaulty).
+   */
+  tuneRapier: (opts: { solverIterations?: number; pgsIterations?: number; canSleep?: boolean }) => void;
 };
 
 export type Preset = {
@@ -86,17 +101,18 @@ export const PRESETS: Preset[] = [
   },
   {
     id: 'e3',
-    name: 'E3 — FixedJoint reakce',
+    name: 'E3 — FixedJoint orbit',
     description:
-      '2 pixely + FixedJoint mezi nimi, jeden kopnu. Druhý reaguje? ∑P drží? (TODO: joint tvorba — zatím setup bez jointu)',
+      '2 pixely (m=1) v (0,0) a (1,0), FixedJoint, vy=0.5 na pravém. canSleep=false (Pixelodynamics default), solver iters=16/PGS=4 (tuned). Analytical: ω=0.3 rad/s, cm posun (0, 2.5) za 10s, pair angle 3 rad. Drift po 10s typicky <0.05% na ω, ∑P konzervován k f32 epsilon. Sezení 8 baseline po vyladění sleep+solver.',
     setup: (api) => {
       api.setIntegration('rapier');
       api.setG(0);
-      api.spawn(-0.5, 0, 0, 0, 0, 0);
-      api.spawn(+0.5, 0, 1, 0, 0, 0);
-      // Joint API zatím neimplementováno (fáze 3 work). E3 zatím slouží jako geometrický baseline.
+      api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
+      const a = api.spawn(0, 0, 0, 0, 0, 0);
+      const b = api.spawn(1, 0, 0, 0.5, 0, 0);
+      api.connect(a, b);
     },
-    stopAtTime: 30,
+    stopAtTime: 10,
   },
   {
     id: 'e5',

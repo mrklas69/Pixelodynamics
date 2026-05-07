@@ -6,6 +6,8 @@
   import { computeFacts, emptyFacts, type Facts, type Champion } from '../sim/facts';
   import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
+  import { createFixedJoint, removeJoint } from '../sim/joints';
+  import { playSpawn } from '../audio/sfx';
   import { Renderer } from '../render/gl';
   import { createCamera, projection, screenToWorld, worldToScreen } from '../render/camera';
   import type { Camera, Pixel } from '../types';
@@ -70,6 +72,7 @@
 
   // Centroid systému ve screen-space px pro overlay křížek. null = prázdná scéna.
   let centroidScreen = $state<{ x: number; y: number } | null>(null);
+
 
   // HOVER tooltip — info o nejbližším pixelu pod kurzorem.
   // null = mimo canvas / mimo pixel.
@@ -139,6 +142,35 @@
     hover = null;
     cursor = null;
     centroidScreen = null;
+    connectionCount = 0;
+  }
+
+  /**
+   * Manuální spojení posledních dvou spawned pixelů. Bez detekce dotyku po straně
+   * (TODO fáze 3); pixely můžou být kdekoli a anchor padne na midpoint mezi centry.
+   */
+  function connectLastTwo(): void {
+    if (!world) return;
+    const n = world.pixels.length;
+    if (n < 2) {
+      showToast('Potřebuješ aspoň 2 pixely', 1500);
+      return;
+    }
+    const a = world.pixels[n - 2]!;
+    const b = world.pixels[n - 1]!;
+    createFixedJoint(world, a, b);
+    connectionCount = world.joints.length;
+    showToast(`🔗 #${a.id} ↔ #${b.id}`, 1200);
+  }
+
+  /** Rozpojí všechny aktivní jointy. Click sound za každý break (rapid-fire OK díky poolu). */
+  function disconnectAll(): void {
+    if (!world || world.joints.length === 0) return;
+    const n = world.joints.length;
+    // Kopie — removeJoint mutuje world.joints, takže iterace přes původní array by selhala.
+    for (const j of world.joints.slice()) removeJoint(world, j);
+    connectionCount = 0;
+    showToast(`✂ ${n} joint${n === 1 ? '' : 'y'} zrušen${n === 1 ? '' : 'y'}`, 1500);
   }
 
   function showToast(msg: string, ms = 2500): void {
@@ -215,17 +247,44 @@
     stopAtTime = preset.stopAtTime ?? null;
     stoppedAtTime = false;
     paused = false;
+    const w = world;
+    // Reset Rapier tunings na defaulty před setup, aby předchozí preset (E3t) neovlivnil
+    // následující bez explicitní tuneRapier volby.
+    w.setSolverIterations(4);
+    w.setPgsIterations(1);
+    w.setDefaultCanSleep(true);
     preset.setup({
       setG: (g) => (G = g),
       setH: (h) => (H = h),
       setIntegration: (m) => (integration = m),
       setUseGrid: (b) => (useGrid = b),
-      spawn: (x, y, vx, vy, r, rs, m = 1, pinned = false) => {
-        if (world) world.spawnPixelExact(x, y, vx, vy, r, rs, m, pinned);
+      spawn: (x, y, vx, vy, r, rs, m = 1, pinned = false) =>
+        w.spawnPixelExact(x, y, vx, vy, r, rs, m, pinned),
+      connect: (a, b) => {
+        createFixedJoint(w, a, b);
+      },
+      tuneRapier: (opts) => {
+        if (opts.solverIterations !== undefined) w.setSolverIterations(opts.solverIterations);
+        if (opts.pgsIterations !== undefined) w.setPgsIterations(opts.pgsIterations);
+        if (opts.canSleep !== undefined) w.setDefaultCanSleep(opts.canSleep);
       },
     });
     pixelCount = world.pixels.length;
+    connectionCount = world.joints.length;
     showToast(`▶ ${preset.name}`, 1800);
+  }
+
+  /**
+   * Edge bit pro anchor v lokálním frame pixelu. Dominantní osa určuje, kterou
+   * stranu pixelu maskovat. Mapování: bit 0 = +X, 1 = -X, 2 = +Y, 3 = -Y.
+   * Pro 45° anchory (|x| == |y|) je výsledek arbitrární — nikdo to neřeší,
+   * corner cases jsou v Pixelodynamics okrajové.
+   */
+  function edgeBit(a: { x: number; y: number }): number {
+    if (Math.abs(a.x) >= Math.abs(a.y)) {
+      return a.x >= 0 ? 1 : 2;
+    }
+    return a.y >= 0 ? 4 : 8;
   }
 
   /**
@@ -276,6 +335,7 @@
         const wp = screenToWorld(camera, viewport, e.clientX - rect.left, e.clientY - rect.top);
         w.spawnPixel(wp.x, wp.y);
         pixelCount = w.pixels.length;
+        playSpawn();
       };
       canvas.addEventListener('pointerdown', onPointerDown);
 
@@ -420,6 +480,7 @@
         renderer.reserve(w.pixels.length);
         const data = renderer.instanceData;
         const idData = renderer.idData;
+        const maskData = renderer.maskData;
         for (let i = 0; i < w.pixels.length; i++) {
           const p = w.pixels[i]!;
           const t = p.body.translation();
@@ -428,6 +489,21 @@
           data[i * 4 + 2] = p.body.rotation();
           data[i * 4 + 3] = 0.5;
           idData[i] = p.id;
+          maskData[i] = 0;
+        }
+        // Edge mask z jointů: pro každý joint určíme dominantní lokální osu anchoru
+        // a maskneme příslušnou hranu. Component outline = boundary připojené komponenty
+        // bez vnitřních čar mezi pixely. O(J·N) přes indexOf, pro J malé OK; pro velké
+        // composite objects bude potřeba pixel→index Map.
+        if (w.joints.length > 0) {
+          const idxOf = new Map<typeof w.pixels[number], number>();
+          for (let i = 0; i < w.pixels.length; i++) idxOf.set(w.pixels[i]!, i);
+          for (const j of w.joints) {
+            const ai = idxOf.get(j.a);
+            if (ai !== undefined) maskData[ai] = maskData[ai]! | edgeBit(j.anchorA);
+            const bi = idxOf.get(j.b);
+            if (bi !== undefined) maskData[bi] = maskData[bi]! | edgeBit(j.anchorB);
+          }
         }
         // Hybrid border: nejméně 1 screen px, nejvýše 5 % strany pixelu.
         const borderHalfWidth = Math.max(0.05, 1 / camera.zoom);
@@ -449,6 +525,7 @@
 
         if (displayAccum > 0.5) {
           displayAccum = 0;
+          connectionCount = w.joints.length;
           const d = computeDiagnostics(w);
           sumP = Math.hypot(d.px, d.py);
           sumL = d.L;
@@ -605,6 +682,12 @@
     </button>
     <button class="secondary" onclick={() => void exportModelshot(false)}>
       📋 Export JSON
+    </button>
+    <button class="secondary" onclick={connectLastTwo} title="FixedJoint mezi 2 posledními pixely (anchor = midpoint)">
+      🔗 Spojit poslední 2 pixely
+    </button>
+    <button class="secondary" onclick={disconnectAll} title="Odstraní všechny aktivní jointy" disabled={connectionCount === 0}>
+      ✂ Rozpojit vše
     </button>
 
     <h2>PRESETS</h2>

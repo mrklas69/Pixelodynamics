@@ -14,12 +14,15 @@ precision highp float;
 layout(location = 0) in vec2 a_local;          // base quad: -0.5..0.5
 layout(location = 1) in vec4 a_instance;       // (x, y, rotation, halfSize)
 layout(location = 2) in float a_id;            // pixel.id
+layout(location = 3) in float a_edgeMask;      // 4-bit mask, encoded as float 0..15
+                                               // bit 0: +X edge, 1: -X, 2: +Y, 3: -Y
 
 uniform mat3 u_proj;
 uniform float u_lockedId;                      // -1 = žádný lock
 
 out vec2 v_local;
 out float v_locked;                            // 1.0 = tento instance je lock target
+flat out int v_edgeMask;
 
 void main() {
   float c = cos(a_instance.z);
@@ -32,27 +35,48 @@ void main() {
   v_local = a_local;
   // ID < 2^24 je v float32 reprezentováno přesně, takže porovnání je spolehlivé.
   v_locked = (abs(a_id - u_lockedId) < 0.5) ? 1.0 : 0.0;
+  v_edgeMask = int(a_edgeMask + 0.5);
 }
 `;
 
 // Fragment vyplní jen pruh u kraje (vnitřek discard). Lockovaný pixel dostane
 // amber barvu shodující se s ikonou 🔒 v HUD (#d8b76f). Default = chladná modrobílá.
+//
+// Edge mask: hrany sousedící s jointem se vykreslí červeně (#d86f6f) místo
+// default base. Vizuální signál spoje se zachová i pro long-distance jointy
+// (kde transparency by se ztrácela), bez black gapů v rozích.
 const FRAG_SRC = /* glsl */ `#version 300 es
 precision highp float;
 
 in vec2 v_local;
 in float v_locked;
+flat in int v_edgeMask;
 uniform float u_borderHalfWidth;
 out vec4 outColor;
 
 void main() {
-  vec2 d = vec2(0.5) - abs(v_local);
-  float minDist = min(d.x, d.y);
+  // Vzdálenost k jednotlivým hranám (kladná = uvnitř quadu).
+  float dPosX = 0.5 - v_local.x;
+  float dNegX = 0.5 + v_local.x;
+  float dPosY = 0.5 - v_local.y;
+  float dNegY = 0.5 + v_local.y;
+
+  float minDist = min(min(dPosX, dNegX), min(dPosY, dNegY));
   if (minDist > u_borderHalfWidth) discard;
+
+  // Pokud je nejbližší hrana maskovaná, fragment dostane joint barvu.
+  // Pro corner fragmenty (2 edges == minDist) stačí, že jedna z nich je masked.
+  bool jointEdge = false;
+  if (dPosX <= minDist && (v_edgeMask & 1) != 0) jointEdge = true;
+  if (dNegX <= minDist && (v_edgeMask & 2) != 0) jointEdge = true;
+  if (dPosY <= minDist && (v_edgeMask & 4) != 0) jointEdge = true;
+  if (dNegY <= minDist && (v_edgeMask & 8) != 0) jointEdge = true;
 
   vec3 base = vec3(0.85, 0.92, 1.0);
   vec3 lockCol = vec3(0.847, 0.718, 0.435);    // #d8b76f
+  vec3 jointCol = vec3(0.847, 0.435, 0.435);   // #d86f6f
   vec3 col = mix(base, lockCol, v_locked);
+  if (jointEdge) col = jointCol;
   outColor = vec4(col, 1.0);
 }
 `;
@@ -66,10 +90,12 @@ export class Renderer {
   uBorder: WebGLUniformLocation;
   uLockedId: WebGLUniformLocation;
   idBuffer: WebGLBuffer;
+  maskBuffer: WebGLBuffer;
   capacity = 0;
   // CPU-side scratch buffery pro instance data — alokujeme jednou, pak jen přepisujeme.
   instanceData: Float32Array = new Float32Array(0); // per instance vec4 (x, y, rot, halfSize)
   idData: Float32Array = new Float32Array(0); // per instance float (pixel.id)
+  maskData: Float32Array = new Float32Array(0); // per instance float (4-bit edge mask, 0..15)
 
   constructor(canvas: HTMLCanvasElement) {
     const gl = canvas.getContext('webgl2', { antialias: true, alpha: false });
@@ -119,8 +145,21 @@ export class Renderer {
     gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 0, 0);
     gl.vertexAttribDivisor(2, 1);
 
+    // Edge mask buffer — 4-bit mask per instance, kódovaný jako float (0..15).
+    const mbo = gl.createBuffer();
+    if (!mbo) throw new Error('Nelze vytvořit mask buffer');
+    this.maskBuffer = mbo;
+    gl.bindBuffer(gl.ARRAY_BUFFER, mbo);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 0, 0);
+    gl.vertexAttribDivisor(3, 1);
+
     gl.bindVertexArray(null);
     gl.clearColor(0.05, 0.06, 0.09, 1.0);
+    // Alpha blending pro semi-transparent edge mask (joint fade na 50%).
+    // Standardní src-over: outColor.rgb·src.a + background·(1-src.a).
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
   }
 
   /** Zajistí, že instance buffer má kapacitu pro n instancí. */
@@ -132,11 +171,14 @@ export class Renderer {
     this.capacity = cap;
     this.instanceData = new Float32Array(cap * 4);
     this.idData = new Float32Array(cap);
+    this.maskData = new Float32Array(cap);
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.instanceData.byteLength, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.idBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.idData.byteLength, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.maskBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.maskData.byteLength, gl.DYNAMIC_DRAW);
   }
 
   resize(w: number, h: number): void {
@@ -169,6 +211,8 @@ export class Renderer {
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData.subarray(0, count * 4));
     gl.bindBuffer(gl.ARRAY_BUFFER, this.idBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.idData.subarray(0, count));
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.maskBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.maskData.subarray(0, count));
 
     gl.bindVertexArray(this.vao);
     gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, count);

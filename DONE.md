@@ -1,5 +1,23 @@
 # DONE
 
+## 2026-05-08 — Sezení 8: Fáze 3 entry — FixedJoint API, audio, edge mask, sleep-mode fix
+
+- **FixedJoint API** (`src/sim/joints.ts`) — `createFixedJoint(world, a, b)` (anchor = midpoint v lokálním frame přes `R(-rot)·worldOffset`), `removeJoint`, `removeAllJointsSilent`. Frame parametr `JointData.fixed(anchorA, rB-rA, anchorB, 0)` preserve aktuální rotation gap (žádný snap při create i pro pixely s random rotacemi).
+- **Audio modul** (`src/audio/sfx.ts`) — pool 5 `HTMLAudioElement` per zvuk (round-robin pro overlapping plays). `playClick()` (joint create+remove), `playSpawn()` (LMB). Asset import z `src/assets/click.mp3` + `spawn.mp3`. Autoplay-block tiše ignorován.
+- **Manuální connect/disconnect tlačítka** v COMMANDS panelu — 🔗 Spojit poslední 2 (anchor midpoint mezi centry, edgeBit dominantní lokální osu), ✂ Rozpojit vše (slice copy, removeJoint per joint). Connection counter wire-up.
+- **Edge mask vizualizace** (`src/render/gl.ts` + `App.svelte`) — 4-bit mask per pixel (bity +X, -X, +Y, -Y) jako per-instance WebGL attribute. FS check `dPosX <= minDist && (mask & 1)` → barva `#d86f6f` (joint red). Iterace: nejprve discard (vznikly černé zobáčky v rozích), pak 50% transparency, finále červená barva (vizuální signál místo geometrie destrukce). Per-frame compute O(N + J) přes `Map<Pixel, idx>`. Anchor v lokálním frame zachovává mask přes pixel rotaci přirozeně.
+- **`World.defaultCanSleep = false`** jako Pixelodynamics-wide default (`src/sim/physics.ts`). Sleep mode označen jako anti-feature pro fyzikální sandbox — v default E3 baseline uspal rotující rigid pair během <2 s a dissipoval 100% momentu (linear i angular). Toggle přes `setDefaultCanSleep(b)` jen pro replikaci původního chování.
+- **Rapier IntegrationParameters tuning** — `setSolverIterations(n)` (default 4), `setPgsIterations(n)` (default 1) na World. Per-preset přes `PresetAPI.tuneRapier({ solverIterations, pgsIterations, canSleep })`. Reset na default v `applyPreset` před `preset.setup`.
+- **E3 preset finální podoba** — 2 pixely (0,0)/(1,0) edge-to-edge, vy=0.5 na pravém, FixedJoint, tuned (canSleep=false + iters=16/PGS=4). Smazány E3 (broken default) a E3s (mise splněna). Drift po 10s ~0.01-0.03% na ω/L/KE, ∑P k f32 epsilon.
+- **`PresetAPI` rozšíření** — `spawn` vrací `Pixel` handle, `connect(a, b)` wrapper kolem `createFixedJoint`, `tuneRapier(opts)` per-preset Rapier konfigurace.
+- **Spawn LMB sound hook** — `playSpawn()` v `onPointerDown` (po `world.spawnPixel`).
+- **`@BEGIN`/`@END` makro update** (`CLAUDE.md`) — dev server jako detached proces (`Start-Process cmd /c npm run dev -WindowStyle Hidden`), PID file v `.claude/dev-server.pid`. Server přežije Claude Code restart i `/clear`. @BEGIN vypisuje URL `http://localhost:5173/` jako klikací odkaz, @END kill přes `taskkill /T /F`.
+- **E3 modelshot dissipation analysis** — pure rapier mode default modelshot: vx=vy=0, KE=0 po 10 s. Fit exponential decay: `λ ≈ 0.5/s`, half-life ~1.4 s. Hypotéza sleep+Baumgarte ověřena E3-tune mini-experimentem (E3 broken / E3s no-sleep matches / E3t tuned best). Sleep mode = 100% viník katastrofického selhání; solver iterations = další řád přesnosti.
+- **Lessons learned (z censure):**
+  - Default Rapier configuration (sleep, damping) by se měla auditovat jako součást `@BEGIN` setupu pro Rapier-based feature.
+  - Shader corner cases (rohy quadu kde 2 hrany jsou stejně blízko) je nutné mentálně procházet při psaní FS, ne jen středy hran.
+  - API se signature+frame parametry (`JointData.fixed(anchorA, frame1, anchorB, frame2)`) musí číst doc strings — default 0/0 byl tichá chyba pro identical-rotation případ.
+
 ## 2026-05-07 — Sezení 7: Centroid křížek, cursor v HUD, cutoff factor benchmark
 
 - **Vizualizace centroidu** — uzavírá stale Příště (5 sezení). CSS overlay `<div class="centroid">` se ::before/::after pseudoelementy (16×16 px screen-fixed křížek modrý #6f8ec1). `computeCentroid(world)` v `diagnostics.ts` (lehká O(N) per-frame verze, vrací null pro prázdný world). `worldToScreen(cam, viewport, wx, wy)` v `camera.ts` (algebraická inverze `screenToWorld`). Update centroidu per frame v render loopu.

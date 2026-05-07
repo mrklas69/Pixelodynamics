@@ -66,10 +66,20 @@ type CompositeObject = {
 
 **Kontext (sezení 3):** E5 vs. E5m empiricky potvrdilo, že naivní `manuální stepGravity + Rapier.step()` integruje pohyb **dvakrát** (manual drift + Rapier drift), simulace běží zhruba 2× rychleji než pure manual. Plus Rapier WASM bridge ve f32 → ∑P/∑L drift 10⁴× horší (1e-12 vs. 1e-15 v pure manual). Naive hybrid je nepoužitelný.
 
-Tři architektonické cesty, žádná zatím empiricky netestovaná na realných jointech:
+**Update (sezení 8):** Po E3-tune víme, že rapier joint solver je po `canSleep=false` + `solverIterations=16` + `pgsIterations=4` použitelný jako **trusted reference** pro joint dynamiku — drift po 10s je 0.01% na ω, ∑P k f32 epsilon. Joint-side dissipace v rapieru NENÍ problém; problém zůstává **gravity-side** integrace v rapieru (sezení 2). α/β/γ proto má za cíl: **nechat rapier řešit jointy, ale gravity kick aplikovat manuálním Eulerem**.
+
+Tři architektonické cesty:
 
 - **(α) Velocity-Verlet split:** `stepGravity` dělá jen `v += a·dt` (kick); pos drift udělá Rapier `step()` jednou per frame. Standardní pattern. Risk: f32 drift v Rapieru se přenese na pos všech pixelů, ne jen na ty s constraints.
 - **(β) Save-zero-restore vel:** manual dělá kick+drift normálně. Před `Rapier.step()` linvel uložíme stranou, vynulujeme → Rapier neposune pos (jen vyřeší constraints) → po stepu čteme delta linvel z constraint impulses, přičteme k uloženým. Komplexní, ale Rapier neovlivní kinematiku. Risk: konfliktní logika v Rapier solveru (může spoléhat na nenulovou vel).
 - **(γ) Rapier step jen když existují aktivní jointy/kontakty:** v čistě orbitálních fázích (před slepenci) bypass Rapier. Při fázi 3 detekce zapne `step()`. Nejjednodušší, ale "bimodální" chování — výkonový profil mění se stavem. Risk: přepnutí může mít edge cases (jeden frame jointy, druhý ne).
 
-**Co rozhodne volbu:** reálný scénář se 2 pixely + FixedJoint, jeden v pohybu. Naměřit pos/vel po N krocích pro každou variantu, porovnat s analytickým řešením rigid těla.
+**Co rozhodne volbu:** preset E8 s G=1 + 2 free pixely + 1 pinned attractor + FixedJoint mezi 2 free. Naměřit pos/KE/∑P drift po N krocích pro každou variantu vs. analytical (eliptická orbit) nebo pure rapier baseline (ten je teď trusted reference díky sezení 8).
+
+### Rapier sleep mode jako anti-feature (sezení 8)
+
+`canSleep=true` (default Rapier) uspí těleso, jehož `linvel` + `angvel` zůstanou pod threshold po určitý čas. Pro herní scénáře (mnoho neaktivních objektů na scéně) úspora CPU. Pro fyzikální sandbox **anti-feature** — uspí rotující rigid pair během <2 s a tichne dynamics (E3 default modelshot: KE=0 po 10s, fit `λ≈0.5/s` exponential decay).
+
+**Lekce:** Default config knihoven optimalizován pro nejčastější use case (typicky herní). Pro physics simulation MUST audit defaults — sleep, damping, ERP, solver iterations, CCD — a explicitně přepsat ty, kde se naše use case liší.
+
+Memory `feedback_default_config_audit` zvážit, pokud se Rapier default-bias projeví znovu.

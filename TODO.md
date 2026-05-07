@@ -16,13 +16,17 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 
 ## Fáze 3 — slepování
 
-- [ ] **Hybrid orchestrace** — naive `manuální stepGravity + Rapier.step()` empiricky vyloučen v sezení 3 (E5 vs. E5m: hybrid běží násobně rychleji, ∑P/∑L drift 10⁴× horší kvůli f32 bridge). Volba mezi (α/β/γ) viz IDEAS, rozhodnutí až s reálným joint scénářem.
-- [ ] Detekce „dotyku po straně" — collisionGroups zapnout, contact event
-- [ ] FixedJoint mezi sousedy (parametr `H` ze SETTINGS = stiffness)
-- [ ] Vizualizace vazeb — pixel rámeček s **vynechanou hranou** ve směru spoje. Edge mask 4 bits (N/E/S/W) per pixel, dynamicky updatovat při joint změně.
-- [ ] Edge case: jeden pixel slepený se 2+ sousedy → struktura, ne řetězec
+- [x] **FixedJoint API** — `createFixedJoint(world, a, b)` + `removeJoint` v `src/sim/joints.ts` (sezení 8). Anchor = midpoint mezi centry, frame parametr preserve aktuální rotation gap (žádný snap při create).
+- [x] **Audio při create/break** — `playClick()` z `src/audio/sfx.ts`, pool 5 instancí. Sezení 8.
+- [x] **Vizualizace vazeb** — edge mask 4-bit per pixel (sezení 8), maskovaná hrana se kreslí červeně `#d86f6f`. Per-instance attribute v rendereru, FS check minDist vs mask. Po fázi 3 detekci kontaktů se mask aplikuje automaticky.
+- [x] **Connections counter** — wire-up `world.joints.length` v display ticku + tlačítkách (sezení 8).
+- [x] **Manuální connect/disconnect tlačítka** — 🔗 Spojit poslední 2, ✂ Rozpojit vše (sezení 8). Pro testovací scénáře bez kontaktové detekce.
+- [x] **Default `canSleep=false`** — sezení 8. Sleep mode v Rapieru způsobil 100% dissipaci joint dynamics v default E3 baseline. Není potřeba pro fyzikální sandbox.
+- [ ] **Hybrid orchestrace** — naive `manuální stepGravity + Rapier.step()` empiricky vyloučen v sezení 3 (E5 vs. E5m: hybrid běží násobně rychleji, ∑P/∑L drift 10⁴× horší kvůli f32 bridge). Volba mezi (α/β/γ) viz IDEAS. **Po sezení 8** víme: rapier joint solver je trusted reference (po canSleep=false + tuned iters), takže α/β/γ má kompenzovat **gravity-side** dissipaci. Cíl Stage 2: nový preset E8 s G=1 + joint + porovnání tří hybridů.
+- [ ] Detekce „dotyku po straně" — collisionGroups zapnout, contact event listener, auto-`createFixedJoint`. Bez tohoto je slepování jen manuální (tlačítkem nebo presetem).
+- [ ] Edge case: jeden pixel slepený se 2+ sousedy → struktura, ne řetězec. Edge mask už podporuje N+E+S+W současně, fáze 3 detekce by jen plnila víc bitů.
 - [ ] **Composite object dataset** (viz IDEAS.md) — `id, pixelIds, x, y, vx, vy, r, rs, m, I`. Update centroidu při změně topologie nebo per-tick.
-- [ ] Wire up Largest a Connections counters do STATS
+- [ ] Wire up Largest counter do STATS — až budou composite objects.
 - [ ] Hover infotipy rozšířit na CompositeObject (až budou)
 
 ## Fáze 4 — hmotnost a pružnost
