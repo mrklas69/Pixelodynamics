@@ -26,16 +26,39 @@ export class World {
   /**
    * Vytvoří nový pixel na zadané pozici s náhodnými počátečními rychlostmi a rotací.
    * Rozsahy random hodnot jsou v `params.ts` jako konstanty programu.
+   * Pro deterministické scénáře (presety, experimenty) použij `spawnPixelExact`.
    */
   spawnPixel(x: number, y: number): Pixel {
+    return this.spawnPixelExact(
+      x,
+      y,
+      (Math.random() - 0.5) * 2 * SPAWN_LINVEL_MAX,
+      (Math.random() - 0.5) * 2 * SPAWN_LINVEL_MAX,
+      Math.random() * Math.PI * 2,
+      (Math.random() - 0.5) * 2 * SPAWN_ANGVEL_MAX,
+      1,
+    );
+  }
+
+  /**
+   * Deterministický spawn — všechny atributy explicitní. Používá se v presetech, aby
+   * experimenty byly reprodukovatelné. `m` je strukturně přítomné, ale Rapier mass
+   * je odvozená z density × area; vlastní m používá náš manuální integrátor.
+   */
+  spawnPixelExact(
+    x: number,
+    y: number,
+    vx: number,
+    vy: number,
+    r: number,
+    rs: number,
+    m: number,
+  ): Pixel {
     const desc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(x, y)
-      .setLinvel(
-        (Math.random() - 0.5) * 2 * SPAWN_LINVEL_MAX,
-        (Math.random() - 0.5) * 2 * SPAWN_LINVEL_MAX,
-      )
-      .setAngvel((Math.random() - 0.5) * 2 * SPAWN_ANGVEL_MAX)
-      .setRotation(Math.random() * Math.PI * 2);
+      .setLinvel(vx, vy)
+      .setAngvel(rs)
+      .setRotation(r);
     const body = this.rapier.createRigidBody(desc);
 
     // Čtverec o straně 1 U → halfExtent = 0.5.
@@ -45,7 +68,7 @@ export class World {
       .setDensity(1);
     this.rapier.createCollider(colliderDesc, body);
 
-    const pixel: Pixel = { id: nextId++, body, m: 1 };
+    const pixel: Pixel = { id: nextId++, body, m };
     this.pixels.push(pixel);
     return pixel;
   }

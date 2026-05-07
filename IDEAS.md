@@ -60,3 +60,15 @@ type CompositeObject = {
 **Řešení pro FVP:** Vlastní symplektický Euler, Rapier step() obejít. Konzervační zákony drží na úroveň float roundoff.
 
 **Otevřené pro fázi 3:** Až přijdou joints + kolize, manuální integrátor sám nestačí. Buď hybrid (gravitace ručně, joints/kolize Rapierem), nebo akceptovat drift až bude přítomna disipace z kolizí (která je beztak silnější).
+
+### Hybrid orchestrace pro fázi 3 — tři varianty
+
+**Kontext (sezení 3):** E5 vs. E5m empiricky potvrdilo, že naivní `manuální stepGravity + Rapier.step()` integruje pohyb **dvakrát** (manual drift + Rapier drift), simulace běží zhruba 2× rychleji než pure manual. Plus Rapier WASM bridge ve f32 → ∑P/∑L drift 10⁴× horší (1e-12 vs. 1e-15 v pure manual). Naive hybrid je nepoužitelný.
+
+Tři architektonické cesty, žádná zatím empiricky netestovaná na realných jointech:
+
+- **(α) Velocity-Verlet split:** `stepGravity` dělá jen `v += a·dt` (kick); pos drift udělá Rapier `step()` jednou per frame. Standardní pattern. Risk: f32 drift v Rapieru se přenese na pos všech pixelů, ne jen na ty s constraints.
+- **(β) Save-zero-restore vel:** manual dělá kick+drift normálně. Před `Rapier.step()` linvel uložíme stranou, vynulujeme → Rapier neposune pos (jen vyřeší constraints) → po stepu čteme delta linvel z constraint impulses, přičteme k uloženým. Komplexní, ale Rapier neovlivní kinematiku. Risk: konfliktní logika v Rapier solveru (může spoléhat na nenulovou vel).
+- **(γ) Rapier step jen když existují aktivní jointy/kontakty:** v čistě orbitálních fázích (před slepenci) bypass Rapier. Při fázi 3 detekce zapne `step()`. Nejjednodušší, ale "bimodální" chování — výkonový profil mění se stavem. Risk: přepnutí může mít edge cases (jeden frame jointy, druhý ne).
+
+**Co rozhodne volbu:** reálný scénář se 2 pixely + FixedJoint, jeden v pohybu. Naměřit pos/vel po N krocích pro každou variantu, porovnat s analytickým řešením rigid těla.

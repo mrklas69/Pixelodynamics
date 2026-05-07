@@ -8,13 +8,13 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] UI slider pro G; ε a substeps schované jako programové konstanty (`params.ts`)
 - [x] Manuální symplektický Eulerův integrátor (Rapier step() obejít) — zachovává ∑P a ∑L
 - [x] Substepping (4× per frame) pro nižší truncation error
-- [ ] Spatial grid (O(n) místo O(n²)) — spustit, až FPS klesne pod 50 při target N
-- [ ] Profilovat: jak vysoké N zvládne current naive O(n²) kód na PC vs. mobilu
+- [!] Spatial grid (O(n) místo O(n²)) — naměřeno P1000=45 FPS, P2000=12 FPS. Target 1000 @ 60 FPS bez gridu nesplnitelný; očekáváno ~10× speedup uniformním gridem s cutoff
+- [x] Profilovat: jak vysoké N zvládne current naive O(n²) kód — P100=60, P500=60, P1000=45, P2000=12 (sezení 3, manual mód, G=1)
 - [ ] Vizualizace centroidu jako křížek
 
 ## Fáze 3 — slepování
 
-- [ ] **Návrat k Rapier step()** — manuální integrátor + Rapier step pro joints/kolize. Hybrid přechod naplánovat.
+- [ ] **Hybrid orchestrace** — naive `manuální stepGravity + Rapier.step()` empiricky vyloučen v sezení 3 (E5 vs. E5m: hybrid běží násobně rychleji, ∑P/∑L drift 10⁴× horší kvůli f32 bridge). Volba mezi (α/β/γ) viz IDEAS, rozhodnutí až s reálným joint scénářem.
 - [ ] Detekce „dotyku po straně" — collisionGroups zapnout, contact event
 - [ ] FixedJoint mezi sousedy (parametr `H` ze SETTINGS = stiffness)
 - [ ] Vizualizace vazeb (čára/barva)
