@@ -1,5 +1,24 @@
 # DONE
 
+## 2026-05-08 — Sezení 13: Stage 3.1 chain-merge rigid-transform + E14 + G100
+
+- **Stage 3.1 — `createFixedJoint(align=true)` 4-cestný rozcestník** v `src/sim/joints.ts`:
+  - **Same-component** (a, b spojeni nepřímo): geom preserve, anchor v a-local frame z current world delta. Žádný snap (rozbil by chain), žádný rigid-transform.
+  - **Fresh-fresh** (oba singletony): symmetric snap kolem midpointu — beze změny od S11. Centroid invariant.
+  - **Fresh+chain / chain+chain** (sjednocená cesta): host = větší řetězec; pro singleton host force hostθ=0, pro multi-pixel host respektuje chain rotation. Direction v host **local frame** → dominantní osa, sign. Target guest pos = `hostPos + R(hostθ)·(±1,0)/(0,±1)`. Rigid transform celého guest řetězce: rotace o Δθ kolem guestPos + translace na target. Internal joint anchory v body local frames zůstávají platné (anchor world rotuje s body). ∑P preserved (`V_unified = ∑P/M_total`), ω=0 (angular momentum loss explicit v align paradigmu).
+  - **Anchor mapping** — `alignXAxis`/`alignSign` z host local frame s polaritou flip pokud b=host. AnchorA/B = ±0.5 podle xAxis flag.
+- **Klíčové fixy proti staré chain-chain větvi:**
+  1. Staré: `setRotation(0)` na a,b lámalo internal anchory chainů s θ≠0. Nové: rigid-transform celého chainu zachová internal geometry.
+  2. Staré: distance ≠ 1U + edge anchor ±0.5 → joint constraint violation. Nové: pos snap na 1U přesně.
+  3. Staré: `setRotation(0)` v `fresh+chain` lámal multi-pixel chain s θ≠0. Nové: fresh pixel rotován do chain frame, chain nedotčený.
+- **Presety v `src/sim/presets.ts`:**
+  - **E14 — Chain-chain merge align (Stage 3.1):** 2 chainy m=3 head-on s Y offset 0.07 U, vx=±0.5, G=0, align mode, stop @ 8 s. Initial ∑P=0, ∑L=0.105, KE=0.75. Expected after: 6-pixel chain (-3.5..+1.5) na Y=0, V=0, ω=0, KE=0 (100% inelastic loss). Modelshot validace odložena na S14.
+  - **G100 — 10×10 čtverec:** 100 pixelů spacing 3 U, `without-interaction` default. Menší sourozenec G1024.
+  - Helper `g1024Spawn` zobecněn na `gridSpawn(api, cols, rows, spacing)`, sdílí oba presety.
+- **Docstring `createFixedJoint`** přepsán na 4-cestný popis (semantika align=true změněna).
+- **DROP `Spawn sound balance`** ze stale Příště (5 sezení S8 → S12 bez akce).
+- `npm run check`: 0 errors.
+
 ## 2026-05-08 — Sezení 12: @AUDIT:DOCS + magnetic merge Stage 2 + Stage 3 MVP
 
 - **`@AUDIT:DOCS` výstup** (≥10 sezení dosaženo + 1× po S11) — 7 kritických (README + MODEL.md za S5–S7 stagnovaly: neaktuální `manual` IntegrationMode, uzavřená α/β/γ debata stále otevřená, „Reset scény" v SETTINGS místo „Clear" v COMMANDS, sekce „Plánované rozšíření" s composite/grid jako otevřené, chybná cutoff formule `F < 0.01·F_peak`), 7 doporučených, 5 kosmetických.

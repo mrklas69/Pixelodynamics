@@ -31,11 +31,11 @@ Implementováno v `src/sim/composite.ts`. Stage 2/3 viz „Magnetic merge algori
 - `stepCompositesAlign(world)` po Rapier step override pos/rot/linvel/angvel z aggregate state.
 - 6-pixel chain v G=20 po 60 s: 1.000 U distances přesně, composite rotates synchronně (Rapier joint solver dodá angular impulses přes lockRotations, my propagujeme).
 
-**Stage 3.1 (TODO)** — chain-merge re-align: pokud 2 multi-pixel chains se spojí, re-snapnout obě na 1U grid. Fixne user-reported cluster bug ze S11/S12.
+**Stage 3.1 (S13) — DONE.** `createFixedJoint(align=true)` 4-cestný rozcestník (same-component / fresh-fresh / fresh+chain / chain+chain). Menší řetězec rigid-transformován **celý** (rotace o Δθ kolem guestPos + translace) v host local frame. Internal joint anchory v body local frames preserved. ∑P preserved (V_unified = ∑P/M), ω=0 (explicit angular momentum loss). Bonus fix: fresh+chain s rotated chainem byl **také rozbitý** (`setRotation(0)` na chain pixelu lámal anchory), sjednocená cesta to vyřešila. E14 preset hotový, modelshot validace odložena na S14.
 
 **Stage 3.2 (TODO)** — composite rotation explicit handling: odstranit lockRotations + drive θ čistě architektonicky.
 
-**Magnet re-aktivace v align mode (TODO)** — po Stage 3.1/3.2: applyMerge + recomputeOffsets v rámci composite-driven framework.
+**Magnet re-aktivace v align mode (TODO)** — po Stage 3.2: applyMerge + recomputeOffsets v rámci composite-driven framework.
 
 ### Align rotation limitation (sezení 11 → IDEAS, motivace pro magnetic merge)
 

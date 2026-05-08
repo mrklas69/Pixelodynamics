@@ -80,19 +80,15 @@ export type Preset = {
 };
 
 /**
- * G1024 — 32×32 grid axis-aligned pixelů, spacing 3 U.
- * Pure gravity collapse pro pozorování krásných průběhů ve `without-interaction` módu;
- * po přepnutí na `not-align` se cluster organicky lepí.
+ * Pravidelný axis-aligned čtvercový grid pixelů. Použito pro G100 (10×10) a G1024 (32×32).
+ * Spacing 3 U je dostatečný odstup, aby gravita měla viditelný kolaps i v krátkém horizontu.
  */
-function g1024Spawn(api: PresetAPI): void {
-  const COLS = 32;
-  const ROWS = 32;
-  const SPACING = 3;
-  const xOff = ((COLS - 1) * SPACING) / 2;
-  const yOff = ((ROWS - 1) * SPACING) / 2;
-  for (let row = 0; row < ROWS; row++) {
-    for (let col = 0; col < COLS; col++) {
-      api.spawn(col * SPACING - xOff, row * SPACING - yOff, 0, 0, 0, 0, 1, false);
+function gridSpawn(api: PresetAPI, cols: number, rows: number, spacing: number): void {
+  const xOff = ((cols - 1) * spacing) / 2;
+  const yOff = ((rows - 1) * spacing) / 2;
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      api.spawn(col * spacing - xOff, row * spacing - yOff, 0, 0, 0, 0, 1, false);
     }
   }
 }
@@ -241,6 +237,48 @@ export const PRESETS: Preset[] = [
     stopAtTime: 3,
   },
   {
+    id: 'e14',
+    name: 'E14 — Chain-chain merge align (Stage 3.1)',
+    description:
+      '2 horizontální chainy m=3 v align mode, head-on s drobným Y offsetem 0.07 U. ' +
+      'Chain A: (-3.5, 0)..(-1.5, 0), vx=+0.5. Chain B: (+1.5, 0.07)..(+3.5, 0.07), vx=-0.5. ' +
+      'Po contactu auto-joint mezi rightmost A a leftmost B v align modu spustí Stage 3.1 ' +
+      'rigid-transform: chain B (menší tiebreak: aIsHost true při equal length) přeloží o ' +
+      '(Tx≈-2, Ty=-0.07) → 6-pixelový chain na (-3.5..+1.5), Y=0, 1U distance přesně.\n' +
+      'G=0, stop @ 8 s. Initial: ∑P=0 (sym), ∑L=0.105 (Y-offset orbital v B), KE=0.75. ' +
+      'After: ∑P=0 ✓, V=0, ω=0 (∑L loss explicitní v align paradigm), KE=0 (100% inelastic).',
+    setup: (api) => {
+      api.setIntegration('align');
+      api.setG(0);
+      api.setUseGrid(false);
+      const a0 = api.spawn(-3.5, 0, +0.5, 0, 0, 0, 1, false);
+      const a1 = api.spawn(-2.5, 0, +0.5, 0, 0, 0, 1, false);
+      const a2 = api.spawn(-1.5, 0, +0.5, 0, 0, 0, 1, false);
+      api.connect(a0, a1);
+      api.connect(a1, a2);
+      const b0 = api.spawn(+1.5, 0.07, -0.5, 0, 0, 0, 1, false);
+      const b1 = api.spawn(+2.5, 0.07, -0.5, 0, 0, 0, 1, false);
+      const b2 = api.spawn(+3.5, 0.07, -0.5, 0, 0, 0, 1, false);
+      api.connect(b0, b1);
+      api.connect(b1, b2);
+    },
+    stopAtTime: 8,
+  },
+  {
+    id: 'g100',
+    name: 'Grid 100 — 10×10 čtverec',
+    description:
+      '100 pixelů v 10×10 axis-aligned gridu, spacing 3 U (range ~27 U). Menší sourozenec ' +
+      'G1024 — rychlejší kolaps, viditelnější detail. Ve `without-interaction` čistá ' +
+      'gravitační dynamika bez kontaktů; v `not-align` cluster organicky lepí.',
+    setup: (api) => {
+      api.setIntegration('without-interaction');
+      api.setG(1.0);
+      api.setUseGrid(true);
+      gridSpawn(api, 10, 10, 3);
+    },
+  },
+  {
     id: 'g1024',
     name: 'Grid 1024 — 32×32 čtverec',
     description:
@@ -252,7 +290,7 @@ export const PRESETS: Preset[] = [
       api.setIntegration('without-interaction');
       api.setG(1.0);
       api.setUseGrid(true);
-      g1024Spawn(api);
+      gridSpawn(api, 32, 32, 3);
     },
   },
 ];

@@ -37,13 +37,21 @@ export type Joint = {
  * sdílená hrana; pro natočené nebo distantní pixely je anchor v rotated frame.
  * Physics dynamics konzistentní (slepenec pruží/kmitá).
  *
- * **`align=true`**: jednorázová destruktivní intervence při create:
- *   1) snap r=0, rs=0 obou pixelů
- *   2) pos snap newer (vyšší id) na axis-aligned 1 U distance od older
- *   3) edge anchor ±0.5 podle dominantní osy
- *   4) lockRotations(true) na obou — Rapier nebude integrovat rotaci → joint pos
- *      constraint je triviálně ortogonální vůči angular dynamics.
- * Žádný per-tick reset (ten by ničil joint warm-start solver cache).
+ * **`align=true`**: rigid-transform menšího řetězce na host frame (Stage 3.1):
+ *   - **fresh-fresh** (oba singletony): snap r=0, rs=0 na obou; symmetric pos snap
+ *     kolem midpointu (centroid preserved); edge anchor ±0.5.
+ *   - **fresh+chain**: fresh pixel rigid-transformován tak, že leží na 1 U od chain
+ *     pixelu v dominantní ose **chain local frame** (chain rotation respected).
+ *   - **chain+chain**: menší řetězec rigid-transformován **celý** (rotace o Δθ kolem
+ *     guest_pixel.pos + translace) tak, aby host_pixel ↔ guest_pixel byly edge-touching
+ *     v host frame. Internal joint anchory guest pixelů jsou v body local frames →
+ *     po rigid transformu zůstávají platné. ∑P preserved (V_unified = ∑P/M_total),
+ *     ω = 0 (angular momentum loss explicitní, consistent s align paradigmem).
+ *   - **same component** (a, b spojené nepřímo): geometry preserve, edge anchor v
+ *     a-local frame z current world delta. Žádný rigid-transform (re-procesoval
+ *     by stejnou komponentu).
+ *   - Po vložení jointu vždy `lockRotations(true)` na všechny dotčené members a
+ *     `recomputeCompositeOffsets` pro celou nově unified komponentu.
  *
  * **Idempotent**: pokud už joint mezi týmiž pixely existuje (v libovolném pořadí a/b),
  * vrátí ho bez side-effects (žádný click, žádný snap, žádná Rapier insertion).
@@ -62,29 +70,57 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
     }
   }
 
-  // Align: destruktivní intervence (rotation snap + pos snap + lockRotations).
-  // Pos snap strategie závisí na existing connectivity:
-  //   - Oba bez jointů (fresh pair): snap **oba** k midpoint ± 0.5 → centroid preserved.
-  //   - Jeden bez jointů: snap jen ten (chrání chain druhého).
-  //   - Oba s jointy (merge komponent): no pos snap (přijmi current pos).
+  // Stage 3.1 — sjednocený align flow přes rigid-transform celého guest řetězce.
+  // Místo destruktivního setRotation(0) na (a,b), které lámalo internal joint anchory
+  // existujících chainů, rotujeme/translatujeme **celý menší řetězec** rigidně tak,
+  // aby se zarovnal s host frame. Internal joint anchory v body local frames zůstávají
+  // platné — world pozice anchorů se otočí společně s bodies.
+  //
+  // Konvence:
+  //   - host = větší řetězec (více členů); pokud equal, vyhrává `a`-strana.
+  //   - guest = menší řetězec; rotuje + translatuje, aby host_pixel ↔ guest_pixel byly
+  //     edge-touching (1 U v dominantní ose host local frame).
+  //   - hostθ: pokud host je singleton (fresh pixel), force 0 (preserve grid-aligned
+  //     UX z fresh-fresh režimu). Pro multi-pixel host použij currentní rotation
+  //     (chrání chain rotation z stepCompositesAlign).
+  //   - Velocities: V_unified = (∑P_A + ∑P_B)/M (∑P preserved), ω = 0 (consistent
+  //     s align destruktivním paradigm — angular momentum loss explicitní).
+  //
+  // Edge case "both pixels in same component" je odchycen duplicate guard nahoře.
+  let alignXAxis = false;
+  let alignSign = 1;
   if (align) {
-    a.body.setRotation(0, true);
-    b.body.setRotation(0, true);
-    a.body.setAngvel(0, true);
-    b.body.setAngvel(0, true);
+    const chainA = collectComponent(world, a);
+    const chainB = collectComponent(world, b);
 
-    const aHasJoint = world.joints.some((j) => j.a === a || j.b === a);
-    const bHasJoint = world.joints.some((j) => j.a === b || j.b === b);
+    if (chainA.includes(b)) {
+      // Same component (a, b spojené nepřímo přes jiné jointy) — joint je redundantní
+      // rigid sub-loop. Geometry preserve, anchor v a-local frame z current world delta.
+      // Žádný snap (rozbil by chain), žádný rigid-transform (re-procesoval by stejnou
+      // komponentu dvakrát).
+      const ta0 = a.body.translation();
+      const tb0 = b.body.translation();
+      const ra0 = a.body.rotation();
+      const cosT = Math.cos(ra0);
+      const sinT = Math.sin(ra0);
+      const dxL = cosT * (tb0.x - ta0.x) + sinT * (tb0.y - ta0.y);
+      const dyL = -sinT * (tb0.x - ta0.x) + cosT * (tb0.y - ta0.y);
+      alignXAxis = Math.abs(dxL) >= Math.abs(dyL);
+      alignSign = alignXAxis ? (dxL >= 0 ? 1 : -1) : (dyL >= 0 ? 1 : -1);
+    } else if (chainA.length === 1 && chainB.length === 1) {
+      // Fresh-fresh: symmetric snap kolem midpointu (centroid preserved, ∑P = 0
+      // pro nehybný pár). Behavior beze změny od S11 implementace.
+      a.body.setRotation(0, true);
+      b.body.setRotation(0, true);
+      a.body.setAngvel(0, true);
+      b.body.setAngvel(0, true);
 
-    const ta0 = a.body.translation();
-    const tb0 = b.body.translation();
-    const dxN = tb0.x - ta0.x;
-    const dyN = tb0.y - ta0.y;
-    const xAxis = Math.abs(dxN) >= Math.abs(dyN);
-    const sign = xAxis ? (dxN >= 0 ? 1 : -1) : (dyN >= 0 ? 1 : -1);
-
-    if (!aHasJoint && !bHasJoint) {
-      // Symmetric snap kolem midpointu — centroid invariant, ∑P=0 zachováno.
+      const ta0 = a.body.translation();
+      const tb0 = b.body.translation();
+      const dxN = tb0.x - ta0.x;
+      const dyN = tb0.y - ta0.y;
+      const xAxis = Math.abs(dxN) >= Math.abs(dyN);
+      const sign = xAxis ? (dxN >= 0 ? 1 : -1) : (dyN >= 0 ? 1 : -1);
       const mx = (ta0.x + tb0.x) / 2;
       const my = (ta0.y + tb0.y) / 2;
       if (xAxis) {
@@ -94,25 +130,103 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
         a.body.setTranslation({ x: mx, y: my - 0.5 * sign }, true);
         b.body.setTranslation({ x: mx, y: my + 0.5 * sign }, true);
       }
-    } else if (!aHasJoint) {
-      // a je fresh, b v existing komponentě → snap a k b
-      if (xAxis) {
-        a.body.setTranslation({ x: tb0.x - sign, y: tb0.y }, true);
-      } else {
-        a.body.setTranslation({ x: tb0.x, y: tb0.y - sign }, true);
-      }
-    } else if (!bHasJoint) {
-      // b je fresh, a v existing komponentě → snap b k a
-      if (xAxis) {
-        b.body.setTranslation({ x: ta0.x + sign, y: ta0.y }, true);
-      } else {
-        b.body.setTranslation({ x: ta0.x, y: ta0.y + sign }, true);
-      }
-    }
-    // else: oba v existing chainech — bez pos snapu (merge komponent, distance může > 1 U).
+      a.body.lockRotations(true, true);
+      b.body.lockRotations(true, true);
+      alignXAxis = xAxis;
+      alignSign = sign;
+    } else {
+      // Stage 3.1 — alespoň jeden řetězec multi-pixel. Rigid-transform menšího
+      // řetězce tak, aby host_pixel ↔ guest_pixel byly edge-touching v host frame.
+      // Internal joint anchory guest pixelů jsou v body local frames → po rigid
+      // transformu zůstávají platné.
+      const aIsHost = chainA.length >= chainB.length;
+      const hostChain = aIsHost ? chainA : chainB;
+      const guestChain = aIsHost ? chainB : chainA;
+      const hostPixel = aIsHost ? a : b;
+      const guestPixel = aIsHost ? b : a;
 
-    a.body.lockRotations(true, true);
-    b.body.lockRotations(true, true);
+      // Host theta — fresh singleton (může nastat při fresh+chain) snapne na 0;
+      // existující chain si drží svou rotation z stepCompositesAlign.
+      let hostTheta = hostPixel.body.rotation();
+      if (hostChain.length === 1) {
+        hostTheta = 0;
+        hostPixel.body.setRotation(0, true);
+      }
+
+      const hostPos = hostPixel.body.translation();
+      const guestPos = guestPixel.body.translation();
+
+      // Direction host→guest v host local frame: R(−hostθ)·(guestPos−hostPos).
+      const cosT = Math.cos(hostTheta);
+      const sinT = Math.sin(hostTheta);
+      const dxW = guestPos.x - hostPos.x;
+      const dyW = guestPos.y - hostPos.y;
+      const dxL = cosT * dxW + sinT * dyW;
+      const dyL = -sinT * dxW + cosT * dyW;
+      const xAxis = Math.abs(dxL) >= Math.abs(dyL);
+      const sign = xAxis ? (dxL >= 0 ? 1 : -1) : (dyL >= 0 ? 1 : -1);
+
+      // Target guest pos v world: hostPos + R(hostθ)·(±1, 0) nebo (0, ±1).
+      const ex = xAxis ? sign : 0;
+      const ey = xAxis ? 0 : sign;
+      const targetGuestX = hostPos.x + cosT * ex - sinT * ey;
+      const targetGuestY = hostPos.y + sinT * ex + cosT * ey;
+
+      // Rigid transform celého guest řetězce: rotace o Δθ kolem guestPos, pak
+      // translate na targetGuest. Δθ zachová guest internal geometry; translace
+      // sjednotí frame s host.
+      const guestTheta = guestPixel.body.rotation();
+      const dTheta = hostTheta - guestTheta;
+      const cosDT = Math.cos(dTheta);
+      const sinDT = Math.sin(dTheta);
+      const Tx = targetGuestX - guestPos.x;
+      const Ty = targetGuestY - guestPos.y;
+
+      for (const p of guestChain) {
+        const pt = p.body.translation();
+        const rx = pt.x - guestPos.x;
+        const ry = pt.y - guestPos.y;
+        const newX = guestPos.x + cosDT * rx - sinDT * ry + Tx;
+        const newY = guestPos.y + sinDT * rx + cosDT * ry + Ty;
+        p.body.setTranslation({ x: newX, y: newY }, true);
+        p.body.setRotation(p.body.rotation() + dTheta, true);
+      }
+
+      // Velocity unification — ∑P preserved, ω = 0 (consistent s align destruktivním
+      // paradigmem; angular momentum loss explicitní rozhodnutí).
+      let M = 0;
+      let pXsum = 0;
+      let pYsum = 0;
+      for (const p of hostChain) {
+        const v = p.body.linvel();
+        M += p.m;
+        pXsum += p.m * v.x;
+        pYsum += p.m * v.y;
+      }
+      for (const p of guestChain) {
+        const v = p.body.linvel();
+        M += p.m;
+        pXsum += p.m * v.x;
+        pYsum += p.m * v.y;
+      }
+      const Vx = M > 0 ? pXsum / M : 0;
+      const Vy = M > 0 ? pYsum / M : 0;
+      for (const p of hostChain) {
+        p.body.setLinvel({ x: Vx, y: Vy }, true);
+        p.body.setAngvel(0, true);
+        p.body.lockRotations(true, true);
+      }
+      for (const p of guestChain) {
+        p.body.setLinvel({ x: Vx, y: Vy }, true);
+        p.body.setAngvel(0, true);
+        p.body.lockRotations(true, true);
+      }
+
+      // alignSign mapuje host-frame sign na anchorA-relative sign (anchorA = a-side).
+      // Pokud b je host, anchorA patří guest → invert sign.
+      alignXAxis = xAxis;
+      alignSign = aIsHost ? sign : -sign;
+    }
   }
 
   const ta = a.body.translation();
@@ -124,18 +238,14 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
   let anchorB: { x: number; y: number };
 
   if (align) {
-    // Edge anchor podle dominantní osy. Po pos snap je distance přesně 1 U a po
-    // rotation snap je local==world frame, takže anchor je (±0.5, 0) nebo (0, ±0.5).
-    const dx = tb.x - ta.x;
-    const dy = tb.y - ta.y;
-    if (Math.abs(dx) >= Math.abs(dy)) {
-      const sx = dx >= 0 ? 1 : -1;
-      anchorA = { x: 0.5 * sx, y: 0 };
-      anchorB = { x: -0.5 * sx, y: 0 };
+    // Edge anchor v local frame. Po rigid-transformu jsou oba pixely v hostθ;
+    // alignSign + alignXAxis pochází z host local frame (s polaritou flip pokud b=host).
+    if (alignXAxis) {
+      anchorA = { x: 0.5 * alignSign, y: 0 };
+      anchorB = { x: -0.5 * alignSign, y: 0 };
     } else {
-      const sy = dy >= 0 ? 1 : -1;
-      anchorA = { x: 0, y: 0.5 * sy };
-      anchorB = { x: 0, y: -0.5 * sy };
+      anchorA = { x: 0, y: 0.5 * alignSign };
+      anchorB = { x: 0, y: -0.5 * alignSign };
     }
   } else {
     // Not-align: midpoint anchor v lokálním frame přes inverzi rotace.
@@ -172,9 +282,10 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
   world.joints.push(joint);
   playClick();
 
-  // Stage 3 (composite-driven kinematics v align mode): po pos/rot snap a vložení jointu
-  // recompute offsets pro celou nově joined komponentu. Offset = R(-θ)·(pos − CoM) v
-  // composite frame; θ = pixel rotation (po align snap = 0, pro chains = anchor θ).
+  // Stage 3 (composite-driven kinematics v align mode): po rigid-transformu a vložení
+  // jointu recompute offsets pro celou nově joined komponentu. Offset = R(-θ)·(pos − CoM)
+  // v composite frame; θ = a.body.rotation() (po Stage 3.1 rigid transformu jsou všichni
+  // members nově unified komponenty na hostθ, takže θ je konzistentní napříč members).
   // V `not-align` mode offsety nepoužíváme — necháváme null (Stage 3 stepCompositesAlign
   // je no-op pro `not-align`).
   if (align) {
