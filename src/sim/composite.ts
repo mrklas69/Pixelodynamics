@@ -9,6 +9,7 @@
 import type { World } from './physics';
 import type { Pixel } from '../types';
 import type { Joint } from './joints';
+import { createFixedJoint } from './joints';
 import { buildPixelIndex } from './diagnostics';
 
 /**
@@ -326,4 +327,134 @@ export function detectMergeCandidates(
     }
   }
   return candidates;
+}
+
+/**
+ * Stage 2 — inelastic merge math + FixedJoint create.
+ *
+ * Spočítá nový aggregate state pro union compA ∪ compB tak, aby se zachovaly
+ * ∑P a ∑L (KE klesne o relativní část — to je inelastic ztráta, ve fázi 4+ s
+ * pružnými spring jointy by se rozetřela do vibrace). Pak snap všech členů na
+ * rigid-body kinematics kolem nového CoM (linvel = V + ω × r, angvel = ω) a
+ * vytvoří FixedJoint mezi candidate edge pair, který bude budoucí pohyb držet.
+ *
+ *   M_new      = M_A + M_B
+ *   CoM_new    = (M_A·CoM_A + M_B·CoM_B) / M_new
+ *   V_new      = (M_A·V_A + M_B·V_B) / M_new                    (∑P preserved)
+ *   L_total    = Σ_X { I_X·ω_X + M_X·(r_X × v_X_rel) }          kde r_X = CoM_X − CoM_new
+ *   I_new      = Σ_X { I_X + M_X·|r_X|² }                       (parallel axis)
+ *   ω_new      = L_total / I_new                                (∑L preserved)
+ *
+ * Skip pokud kterákoliv strana obsahuje pinned pixel — pinned je ∞ mass
+ * conceptuálně a snap na rigid-body kinematics by ho rozhýbal. Vrací `true`,
+ * pokud merge proběhl, `false` jinak.
+ */
+export function applyMerge(world: World, candidate: MergeCandidate): boolean {
+  const compA = candidate.compA;
+  const compB = candidate.compB;
+
+  for (const p of compA.members) if (p.pinned) return false;
+  for (const p of compB.members) if (p.pinned) return false;
+
+  const M = compA.mass + compB.mass;
+  if (M <= 0) return false;
+
+  const cx = (compA.mass * compA.com.x + compB.mass * compB.com.x) / M;
+  const cy = (compA.mass * compA.com.y + compB.mass * compB.com.y) / M;
+  const Vx = (compA.mass * compA.linvel.x + compB.mass * compB.linvel.x) / M;
+  const Vy = (compA.mass * compA.linvel.y + compB.mass * compB.linvel.y) / M;
+
+  const rAx = compA.com.x - cx;
+  const rAy = compA.com.y - cy;
+  const vArelX = compA.linvel.x - Vx;
+  const vArelY = compA.linvel.y - Vy;
+  const LA = compA.angvel * compA.inertia + compA.mass * (rAx * vArelY - rAy * vArelX);
+
+  const rBx = compB.com.x - cx;
+  const rBy = compB.com.y - cy;
+  const vBrelX = compB.linvel.x - Vx;
+  const vBrelY = compB.linvel.y - Vy;
+  const LB = compB.angvel * compB.inertia + compB.mass * (rBx * vBrelY - rBy * vBrelX);
+
+  const L = LA + LB;
+  const IA_new = compA.inertia + compA.mass * (rAx * rAx + rAy * rAy);
+  const IB_new = compB.inertia + compB.mass * (rBx * rBx + rBy * rBy);
+  const I = IA_new + IB_new;
+  const omega = I > 0 ? L / I : 0;
+
+  // Rigid-body snap: linvel = V + ω × r_pixel_z_CoM, angvel = ω.
+  // V 2D je ω × r = ω · (-ry, rx).
+  const apply = (p: Pixel): void => {
+    const t = p.body.translation();
+    const rx = t.x - cx;
+    const ry = t.y - cy;
+    p.body.setLinvel({ x: Vx - omega * ry, y: Vy + omega * rx }, true);
+    p.body.setAngvel(omega, true);
+  };
+  for (const p of compA.members) apply(p);
+  for (const p of compB.members) apply(p);
+
+  // Binding constraint pro budoucí pohyb. Idempotent guard v createFixedJoint
+  // pokrývá situaci, kdy auto-joint už mezitím joint vytvořil (kontakt v dosahu
+  // threshold zároveň znamená kontakt brzy → Started event mohl projet dřív).
+  createFixedJoint(world, candidate.edgeA.pixel, candidate.edgeB.pixel, false);
+
+  return true;
+}
+
+/**
+ * Stage 3 MVP — composite-driven kinematics pro `align` mode.
+ *
+ * **Voláno PO `Rapier.step()`** — Rapier už integroval pos = pos_old + linvel·dt
+ * (drift) a joint solver konvergoval (přibližně rigidní geometrie). Aggregate state
+ * (CoM, V, ω) je rigid body invariant: ∑P/∑L preserved joint solverem (internal
+ * impulses jsou Newton-3 reciprocal). Tato funkce override pos/rot/linvel/angvel
+ * tak, aby geometrie byla **přesně** rigidní podle uložených offsetů — odstraňuje
+ * solver imperfection drift, který v dlouhých simulacích narušuje slepenec.
+ *
+ *   pos_i  = CoM_aggregate + R(θ)·offset_i_local
+ *   rot_i  = θ                (= members[0].rotation, joint solver synchronizoval)
+ *   vel_i  = V_aggregate + ω_aggregate × r_i_world
+ *   rs_i   = ω_aggregate
+ *
+ * Offsets jsou stable (set v `createFixedJoint(align=true)` při změně topologie).
+ * Geometrie zůstává invariant napříč ticky → žádný drift / overlap z imperfect
+ * joint solveru.
+ *
+ * Singleton composites (1 pixel) jsou skipnuty — Rapier je integruje normálně.
+ * Pinned composites jsou skipnuty (∞ mass, override by ho rozhýbal).
+ *
+ * **Pozn.:** s `lockRotations(true)` v align mode (S11 default) θ se nemění
+ * Rapier integrací, c.angvel je effectively 0 → composite jen translates (S11
+ * behavior). Stage 3 přidaná hodnota: rigidní translace je teď enforced (žádný
+ * inter-pixel drift), ne závislá na joint solver konvergenci.
+ */
+export function stepCompositesAlign(world: World): void {
+  const composites = buildComposites(world);
+  for (const c of composites) {
+    if (c.members.length < 2) continue;
+    if (c.members.some((p) => p.pinned)) continue;
+
+    const theta = c.members[0]!.body.rotation();
+    const cosT = Math.cos(theta);
+    const sinT = Math.sin(theta);
+
+    for (const p of c.members) {
+      const ox = p.compositeOffsetX ?? 0;
+      const oy = p.compositeOffsetY ?? 0;
+      // World offset po rotaci o θ.
+      const rxWorld = cosT * ox - sinT * oy;
+      const ryWorld = sinT * ox + cosT * oy;
+      const px = c.com.x + rxWorld;
+      const py = c.com.y + ryWorld;
+      p.body.setTranslation({ x: px, y: py }, true);
+      p.body.setRotation(theta, true);
+      // Linvel rigidního bodu na pozici r: V + ω × r (v 2D perp = (-ry, rx)·ω).
+      p.body.setLinvel(
+        { x: c.linvel.x - c.angvel * ryWorld, y: c.linvel.y + c.angvel * rxWorld },
+        true,
+      );
+      p.body.setAngvel(c.angvel, true);
+    }
+  }
 }

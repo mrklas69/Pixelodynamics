@@ -1,5 +1,37 @@
 # DONE
 
+## 2026-05-08 — Sezení 12: @AUDIT:DOCS + magnetic merge Stage 2 + Stage 3 MVP
+
+- **`@AUDIT:DOCS` výstup** (≥10 sezení dosaženo + 1× po S11) — 7 kritických (README + MODEL.md za S5–S7 stagnovaly: neaktuální `manual` IntegrationMode, uzavřená α/β/γ debata stále otevřená, „Reset scény" v SETTINGS místo „Clear" v COMMANDS, sekce „Plánované rozšíření" s composite/grid jako otevřené, chybná cutoff formule `F < 0.01·F_peak`), 7 doporučených, 5 kosmetických.
+- **Audit fixes:** README — Roadmap fáze 3 → `rozděláno`, hybrid α verdikt místo „otevřené volby", `manual mód` → `without-interaction`, `Reset scény` → `Clear`, gramatika („deformovat se"), live demo odkaz, `audio/` + `composite.ts` ve struktuře. MODEL — sekce „Modes" přepsána na `without-interaction`/`not-align`/`align`, „Plánované rozšíření" rozdělená na hotové (Spatial grid v S4, Composite Stage 1 v S11) a otevřené (Stage 2/3), opravena cutoff formule (`F(7.5)/F_peak ≈ 0.098`). IDEAS — composite dataset + hybrid orchestrace zkráceno na verdikty/pointery. DONE — sezení přerovnána do strict reverse-chronological. TODO — Stage 2 [~] s poznámkou, Stage 3 disambig, [!] legenda smazána.
+- **Magnetic merge Stage 2 — `applyMerge(world, candidate)` v `composite.ts`:**
+  - Skip pokud kterákoli strana obsahuje pinned (∞ mass, snap by ho rozhýbal).
+  - M_new = M_A + M_B; CoM_new = (M_A·CoM_A + M_B·CoM_B)/M_new; V_new = ∑P/M_new — ∑P preserved.
+  - L_total = Σ_X { I_X·ω_X + M_X·(r_X × v_X_rel) } kolem CoM_new (parallel axis Steiner); I_new = Σ_X { I_X + M_X·|r_X|² }; ω_new = L_total/I_new — ∑L preserved.
+  - Per pixel rigid-body snap: linvel = V_new + ω_new × r_offset, angvel = ω_new. Pos preserve.
+  - Create FixedJoint mezi candidate edge pair (idempotent guard pokrývá race s auto-jointem).
+- **App.svelte integrace** — per display tick (5 Hz) po `detectMergeCandidates`, consumed-set guard (každá komponenta zmergována max 1× per tick), gate `integration === 'not-align'` (po revizi z magnet+align bug).
+- **E12 — Magnet merge head-on (m=2 vs m=2):** 2 slepence, edges already-in-MAGNET_THRESHOLD při spawnu (distance 0.098 U), slow v=±0.05 → magnet trigger v prvním display ticku PŘED auto-jointem. G=0, not-align, stop @ 3 s. Initial ∑P=0, ∑L=0, KE=0.005. Po inelastic merge: V_new=0, ω_new=0 → KE_after=0 (100% loss). Modelshot: pixely v ±0.537, ±1.537 (1 U distances ✓), all v=0/rs=0/r=0, `px=py=L=ke=0` ✓.
+- **E13 — Magnet merge tečně (offset → spin emerge):** 2 single pixely, Y offset ±0.05, slow v=±0.05. Initial ∑P=0, ∑L=−0.005, KE=0.0025. Po merge: V_new=0, ω_new=L/I≈−0.0053 → **spin emerge** z čistě translačního momentum. Modelshot: rs=−0.005386 ✓, ∑L=−0.005000098 (drift v 7. decimále = f32 ulp), KE≈1.35e-5 (99.5% loss).
+- **Magnet+align konflikt diagnostikován** — uživatelův modelshot ukázal cluster s pixely v non-1U distances (0.271 U mezi p0 a p13), všichni s drifting velocity. Diagnóza: `applyMerge` hardcoded `createFixedJoint(..., false)` → magnet v align modu vytvořil **not-align jointy** s anchor v current geometrii (ne 1 U grid). Plus hlubší konflikt: Stage 2 math je position-preserving, align je position-snapping → fundamentálně inkompatibilní. **Fix: magnet skip v align mode**. Auto-joint s align=true je jediná správná cesta v align modu, dokud Stage 3 nenahradí FixedJoint.
+- **Stage 3 MVP — composite-driven kinematics (`align` mode):**
+  - **`Pixel.compositeOffsetX/Y: number | null`** — stable local offset v composite frame. null pro singletony (1-pixel composites integrované Rapierem normálně).
+  - **`createFixedJoint(align=true)` po pos/rot snap** volá `recomputeCompositeOffsets(world, a)`:
+    - `collectComponent(world, seed)` BFS přes joints najde všechny členy nově joined komponenty.
+    - Singleton (1 člen) → null.
+    - Multi-pixel: aggregate CoM (mass-weighted), θ = `seed.body.rotation()` (po align snap = 0; v chains stejné dík lockRotations + manual setRotation), offset = R(−θ)·(pos − CoM) pro každého člena.
+  - **`stepCompositesAlign(world)`** voláno PO Rapier step v sim loop align case:
+    - Pro každý multi-pixel composite: aggregate state (CoM, V, ω) z current pixel velocities (∑P/∑L preserved Rapier joint solverem).
+    - Override per člen: pos = CoM + R(θ)·offset, rot = θ (= members[0].rotation), linvel = V + ω × r_world, angvel = ω.
+    - Singleton/pinned skip.
+    - Bez `dt` parametru — drift už proběhl Rapierem, my snap na rigid-correct geometrii (odstraňuje solver imperfection drift).
+  - Sim loop align case split: `not-align` zůstává kick + Rapier; `align` přidává `stepCompositesAlign(w)` po Rapier step.
+  - **Empirie (6-pixel chain G=20 po 60 s):** distance mezi všemi sousedy = **1.000 U přesně** ✓, všichni r=−0.516 + rs=−0.012 (composite rotates synchronně). Joint solver Rapieru aplikuje angular impulses i při lockRotations(true), my je propagujeme přes setRotation(members[0].rotation()) → composite rotation **funguje out-of-the-box**. Stage 3.2 (explicit rotation handling) odložen jako not needed for MVP.
+- **Lessons learned:**
+  - **Magnet+align konflikt** byl predikovatelný z první principů (position-preserving vs position-snapping), ale moje Q3 odpověď neexplorovala konflikty před commitem. **Default to enumerate semantic conflicts** před design lock-in.
+  - **Stage 3 lockRotations obavy** byly špatné — Rapier 2D-compat dovolí angular impulses i při locked rotations. **Test before assume** u 3rd-party physics engine s nedokumentovaným chováním.
+  - **Stage 2 cadence (per display tick) vs auto-joint (per sim tick) race** je fragile — pro real-world magnet usefulness by detection musela běžet per sim tick s gating přes `compositeCount ≤ N`. E12/E13 design (already-in-threshold spawn) byl workaround místo proper solution.
+
 ## 2026-05-08 — Sezení 11: @AUDIT:CODE + redesign IntegrationMode + magnetic merge Stage 1
 
 - **`@AUDIT:CODE` výstup** (10 sezení dosaženo) — 1 kritický (perfSpawn vs pbSpawn duplikát), 1 K2 (Largest champion vždy null), 4 doporučené, 5 kosmetických nálezů. Vynecháno: D2 (SKIP_RAPIER_IF_NO_JOINTS legit pro experiments), D4 (perf alokace bez důvodu), C3 (App.svelte refactor — Svelte single-file convention).
@@ -150,30 +182,6 @@
   - Oba běhy zachovaly ∑E na úroveň truncation. ∑P, ∑L exact 0 (D2 symetrie).
 - **Klíčový závěr:** spatial grid s `cutoff_factor=5` je **culling decision** pro long-range gravitaci, ne approximation. Pro spread setup (E7) se chová kvalitativně jinak než naive (KE 1.73 vs. 3.77, radii 24-28 U vs. 4-10 U). Smoothstep tail neobnovuje cut-off long-range sílu — řeší jen energy conservation across cutoff přechod. Pro Pixelodynamics use case (slepené klastry) je culling OK; pro fázi 6+ rozprostřený plyn zvážit větší `CUTOFF_FACTOR`.
 
-## 2026-05-07 — Sezení 1: FVP scaffold
-
-- Vite + Svelte 5 + TypeScript (strict, `noUncheckedIndexedAccess`)
-- Rapier 2D (`@dimforge/rapier2d-compat` 0.19.3) jako fyzikální solver
-- WebGL2 renderer s instanced quads
-- 2D ortografická kamera (pan/zoom)
-- LMB spawn pixelu, WASD pan, Y/X + wheel zoom
-- Svelte UI: levý/pravý panel, středový canvas
-- README, TODO, IDEAS, DIARY, LICENSE (MIT)
-- GitHub Actions deploy na Pages
-- Public repo na github.com/mrklas69/Pixelodynamics
-
-## 2026-05-07 — Sezení 2: Fáze 2 + UI restrukturalizace
-
-- **Párová pixelová gravitace** s Plummer softeningem (`F = G·m·m/(r²+ε²)^(3/2)`)
-- **Manuální symplektický Eulerův integrátor** pro FVP — Rapier step() obejit; zachovává ∑P a ∑L na úroveň float roundoff
-- **Substepping** 4× per frame pro nižší truncation error
-- **STATS panel** — Time, Pixels, Objects, Connections, ∑P, ∑L, FPS
-- **FACTS panel** — championi (Fastest, Spinniest, Most momentum, Most ang. mom., Most massive); klik na #ID centruje kameru
-- **Home camera** tlačítko (návrat na 0,0, zoom 32)
-- **SETTINGS panel** — G a H slidery, Reset scény
-- **Programové konstanty** v `src/sim/params.ts`: `SPAWN_LINVEL_MAX`, `SPAWN_ANGVEL_MAX`, `GRAVITY_EPSILON`, `GRAVITY_SUBSTEPS`
-- Ověřena Keplerova dynamika emergentně — kuželosečné dráhy kolem těžiště
-
 ## 2026-05-07 — Sezení 4: UI polish, kamerový lock, spatial grid, dokumentace
 
 - **Bug fix #4 (FACTS klik):** `centerOnPixel` jednorázový skok nahrazen plnohodnotným **camera lock** — klik na `#ID` ve FACTS uzamkne kameru, každý frame ji posouvá za pixelem. Mizející pixel zámek shodí + toast.
@@ -208,3 +216,27 @@
 - **Experimenty E1, E2, E5, E5m** — viz diář.
 - **Performance profiling** — N=100 @ 60 FPS, N=500 @ 60 FPS, N=1000 @ 45 FPS, N=2000 @ 12 FPS. O(N²) škála čistá, ~10 ns/op.
 - **Architektonický nález:** naivní `manuální stepGravity + Rapier.step()` integruje pohyb dvakrát + bridguje stav přes f32 (10⁴× worse drift). Pro fázi 3 nelze použít; tři varianty (α/β/γ) zaznamenány v IDEAS.
+
+## 2026-05-07 — Sezení 2: Fáze 2 + UI restrukturalizace
+
+- **Párová pixelová gravitace** s Plummer softeningem (`F = G·m·m/(r²+ε²)^(3/2)`)
+- **Manuální symplektický Eulerův integrátor** pro FVP — Rapier step() obejit; zachovává ∑P a ∑L na úroveň float roundoff
+- **Substepping** 4× per frame pro nižší truncation error
+- **STATS panel** — Time, Pixels, Objects, Connections, ∑P, ∑L, FPS
+- **FACTS panel** — championi (Fastest, Spinniest, Most momentum, Most ang. mom., Most massive); klik na #ID centruje kameru
+- **Home camera** tlačítko (návrat na 0,0, zoom 32)
+- **SETTINGS panel** — G a H slidery, Reset scény
+- **Programové konstanty** v `src/sim/params.ts`: `SPAWN_LINVEL_MAX`, `SPAWN_ANGVEL_MAX`, `GRAVITY_EPSILON`, `GRAVITY_SUBSTEPS`
+- Ověřena Keplerova dynamika emergentně — kuželosečné dráhy kolem těžiště
+
+## 2026-05-07 — Sezení 1: FVP scaffold
+
+- Vite + Svelte 5 + TypeScript (strict, `noUncheckedIndexedAccess`)
+- Rapier 2D (`@dimforge/rapier2d-compat` 0.19.3) jako fyzikální solver
+- WebGL2 renderer s instanced quads
+- 2D ortografická kamera (pan/zoom)
+- LMB spawn pixelu, WASD pan, Y/X + wheel zoom
+- Svelte UI: levý/pravý panel, středový canvas
+- README, TODO, IDEAS, DIARY, LICENSE (MIT)
+- GitHub Actions deploy na Pages
+- Public repo na github.com/mrklas69/Pixelodynamics

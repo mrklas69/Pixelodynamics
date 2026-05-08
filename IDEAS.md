@@ -8,53 +8,34 @@ Surové nápady. `→ TODO` značí, že je nápad zralý a přesunutý do `TODO
 
 Když dva slepence (každý m≥2) se srazí, contact event vzniká **mezi dvěma pixely**, jeden v slepenci A, druhý v B. Současný `drainAndAutoJoint` automaticky vytvoří joint mezi nimi → ze 2 slepenců 1 větší. Logika je správná (duplicate guard se týká pixel pair, ne object pair), ale **empirický test chybí** — preset E12 = 2 head-on slepence m=2 by potvrdil. Edge mask by měl reflektovat nový joint na styčných hranách obou slepenců.
 
-### Composite object dataset (fáze 3+) — Stage 1 → DONE sezení 11
+### Composite object dataset → DONE Stage 1 (sezení 11)
 
-Cache pre-computed state pro každý slepený objekt. Stage 1 (sezení 11) implementuje detection-only verzi v `src/sim/composite.ts`:
+Implementováno v `src/sim/composite.ts`. Stage 2/3 viz „Magnetic merge algorithm" níže. **Otevřené pro Stage 3:**
+- `Composite.angvel` zarovnat na `rs` (izomorfismus s `Pixel.rs`).
+- `r` (orientace) — bude potřeba pro composite-driven kinematics, fix-on-merge.
 
-```ts
-type Composite = {
-  id: number;
-  members: Pixel[];
-  com: { x, y };           // těžiště
-  linvel: { x, y };        // rychlost těžiště
-  angvel: number;          // L_total / I_total
-  mass: number;            // Σ m
-  inertia: number;         // Σ (m·|r_rel|² + m/6)  parallel axis (Steiner)
-};
-```
+### Magnetic merge algorithm — Stage 1 + 2 + 3 MVP → DONE (sezení 11–12)
 
-**Naming:** `rs` (ne VR/omega/w) — izomorfismus s `Pixel.rs`. Princip: podobné věci stejná jména. Composite zatím používá `angvel` (jednodušší v implementaci), bude vyrovnáno na `rs` v Stage 3.
+**Stage 1 (S11) — DONE.** `composite.ts` Composite type, freeEdges, segmentDistance, detectMergeCandidates. Pure detection.
 
-**Otevřené otázky:**
-- `r` (orientace složeného objektu) — fix-on-spawn nebo nepoužívat? Pro vykreslení centroidu (křížek) `r` není potřeba. Pro Stage 3 (composite-driven kinematics) je nutné.
-- Update strategy: full recompute každý tick, nebo incremental update jen na změnách topologie? Při dynamické gravitaci se beztak musí pixel pozice číst → full recompute O(n) je akceptovatelný (potvrzeno v Stage 1: per-display-tick 5 Hz, žádná perf regrese).
+**Stage 2 (S12) — DONE.** `applyMerge(world, candidate)` inelastic merge math:
+- M_new = M_A + M_B; CoM_new = vážený střed; V_new = ∑P/M_new (∑P preserved).
+- L_total kolem CoM_new přes parallel axis (Steiner); ω_new = L_total/I_new (∑L preserved).
+- Pixel rigid-body snap: linvel = V + ω×r, angvel = ω. Pos preserve.
+- FixedJoint create mezi candidate edge pair.
+- E12/E13 verified ∑P/∑L conservation do f32 ulp; spin emerge z translačního momentu v E13 ✓.
+- **Gate `integration === 'not-align'`** — magnet+align konflikt (position-preserving vs position-snapping) skip pro tonight.
 
-### Magnetic merge algorithm (sezení 11 → TODO Stage 2/3)
+**Stage 3 MVP (S12) — DONE.** Composite-driven kinematics v `align` mode:
+- `Pixel.compositeOffsetX/Y` stable local offset, set v `createFixedJoint(align=true)` přes BFS recompute.
+- `stepCompositesAlign(world)` po Rapier step override pos/rot/linvel/angvel z aggregate state.
+- 6-pixel chain v G=20 po 60 s: 1.000 U distances přesně, composite rotates synchronně (Rapier joint solver dodá angular impulses přes lockRotations, my propagujeme).
 
-Uživatelův návrh inelastic merge přes magnetic edge attraction (4 kroky):
+**Stage 3.1 (TODO)** — chain-merge re-align: pokud 2 multi-pixel chains se spojí, re-snapnout obě na 1U grid. Fixne user-reported cluster bug ze S11/S12.
 
-1. **Test all object pairs** — jsou volné hrany v dosahu (`MAGNET_THRESHOLD`)? Volnou hranu si představuji jako silný magnet.
-2. **Pokud ano, vypočítej možný spoj.** Pozor na kolize dalších součástí obou objektů.
-3. **Sečti sumy hybnosti, momentu hybnosti, mechanické energie** — vše, co by se mělo zachovat.
-4. **Vytvoř nový slepenec** s pos = vážený střed podle hmotností. Nastav atributy tak, aby zachovat invarianty.
+**Stage 3.2 (TODO)** — composite rotation explicit handling: odstranit lockRotations + drive θ čistě architektonicky.
 
-**Stage 1 (sezení 11):** Composite + freeEdges + segmentDistance + detectMergeCandidates. Detection only, no merge. STATS counter "Merge cand." jako verifier.
-
-**Stage 2 (next session):** inelastic merge math:
-- M_total = M_A + M_B
-- CoM_new = (M_A·CoM_A + M_B·CoM_B) / M_total
-- V_new = (M_A·V_A + M_B·V_B) / M_total  →  ∑P preserved
-- L_total_rel_new = L_A_rel_new + L_B_rel_new (orbital + spin přes Steiner)
-- ω_new = L_total_rel_new / I_new  →  ∑L preserved
-- KE_new = ½·M·V_new² + ½·I·ω_new² < KE_init  (inelastic merge ztrácí relativní KE → pro fáze 4+ s pružnými spring jointy se ztracená KE rozetře do vibrace)
-
-**Stage 3 (next next session):** composite-driven kinematics nahrazuje FixedJoint v align režimu:
-- Per-tick: aggregate gravity force per-pixel → translational acceleration na CoM. Aggregate gravity torque kolem CoM → angular acceleration.
-- Update CoM kinematics: x += V·dt, V += a·dt; θ += ω·dt, ω += τ/I·dt.
-- Pixel pos = CoM + R(θ) · offset_local (offset je vázaný v okamžik merge).
-- Render: pixel.body.translation/rotation odvozeno z composite state per tick.
-- Auto-merge: per-tick proximity check → pokud detected, apply Stage 2 merge math, update offset_local.
+**Magnet re-aktivace v align mode (TODO)** — po Stage 3.1/3.2: applyMerge + recomputeOffsets v rámci composite-driven framework.
 
 ### Align rotation limitation (sezení 11 → IDEAS, motivace pro magnetic merge)
 
@@ -109,17 +90,15 @@ Pixel mimo `cutoff = ε · cutoffFactor` od všech sousedů zamrzne (force=0 př
 
 **Otevřené pro fázi 3:** Až přijdou joints + kolize, manuální integrátor sám nestačí. Buď hybrid (gravitace ručně, joints/kolize Rapierem), nebo akceptovat drift až bude přítomna disipace z kolizí (která je beztak silnější).
 
-### Hybrid orchestrace pro fázi 3 — tři varianty (→ DONE sezení 9)
+### Hybrid orchestrace — verdikty (→ DONE sezení 9, refaktor S11)
 
-**Kontext (sezení 3):** E5 vs. E5m empiricky potvrdilo, že naivní `manuální stepGravity + Rapier.step()` integruje pohyb **dvakrát** (manual drift + Rapier drift), simulace běží zhruba 2× rychleji než pure manual. Plus Rapier WASM bridge ve f32 → ∑P/∑L drift 10⁴× horší (1e-12 vs. 1e-15 v pure manual). Naive hybrid je nepoužitelný.
+Tři varianty zvážené v sezení 9 nad E8 sweep (pinned attractor + free pair s FixedJoint):
 
-**Update (sezení 8):** Po E3-tune víme, že rapier joint solver je po `canSleep=false` + `solverIterations=16` + `pgsIterations=4` použitelný — drift po 10s je 0.01% na ω. Joint-side dissipace v rapieru NENÍ problém; problém zůstává **gravity-side** integrace v rapieru (sezení 2).
+- **(α) Velocity-Verlet split — winner.** Manual `kick`, Rapier `drift` + joint solver. ∑E drift 0.04 %/30 s, joint distance preserve. Etablováno jako default `not-align` v S11 (dříve `hybrid-α`).
+- **(β) Save-zero-restore — broken.** Nulování vel před Rapier stepem maskuje gravitační stress pro joint solver → rs ≈ 0 + 13 % ∑E leak. V S11 odstraněno z kódu.
+- **(γ) Conditional Rapier step — orthogonal flag.** `SKIP_RAPIER_IF_NO_JOINTS` v `params.ts`, později smazáno v S11 (po zavedení auto-jointu γ přestal být orthogonal — auto-joint vyžaduje broadphase běh).
 
-**Verdikt (sezení 9, E8 sweep):**
-
-- **(α) Velocity-Verlet split — winner.** ∑E drift 0.04 %/30 s, joint distance preserve, rs=0.32 (gravita-induced precesní moment). Etablováno jako default `hybrid-α` mode.
-- **(β) Save-zero-restore — broken.** ∑E drift 13 %/30 s + rs ≈ 0 (pair se netočí). Nulování vel před Rapier stepem maskuje gravitační stress pro joint solver — nedá tidal torque. Plus position-based Baumgarte přes f32 round-trip dissipuje energii. Kód zachován pro reprodukovatelnost, ale empiricky vyloučen.
-- **(γ) Conditional Rapier step — orthogonal flag.** Implementováno jako `SKIP_RAPIER_IF_NO_JOINTS=true` v params.ts. Když `world.joints.length === 0`, hybrid-α/β degeneruje na pure manual (∑P/∑L f64 ulp). Auto-aktivuje se s prvním jointem. Žádné per-mode UI — jen flag.
+**Naivní hybrid (S3 baseline, E5 vs. E5m):** integroval pohyb dvakrát (manual drift + Rapier drift), ∑P/∑L drift 10⁴× horší kvůli f32 WASM bridge. Odmítnut.
 
 ### Rapier "broken pro orbit" je broader princip než jen integrátor (sezení 9)
 

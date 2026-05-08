@@ -7,7 +7,12 @@
   import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, AUTO_JOINT_ON_CONTACT, MAGNET_THRESHOLD } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
   import { createFixedJoint } from '../sim/joints';
-  import { buildComposites, detectMergeCandidates } from '../sim/composite';
+  import {
+    buildComposites,
+    detectMergeCandidates,
+    applyMerge,
+    stepCompositesAlign,
+  } from '../sim/composite';
   import { playSpawn } from '../audio/sfx';
   import { Renderer } from '../render/gl';
   import { createCamera, projection, screenToWorld, worldToScreen } from '../render/camera';
@@ -459,19 +464,28 @@
                 break;
 
               case 'not-align':
-              case 'align':
                 // Velocity-Verlet split: manual jen kick (v += a·dt), drift + joint solver
                 // dělá Rapier `world.step()`. Substepy gravity se aplikují všechny před
                 // jediným Rapier krokem — gravita je integrovaná SUBSTEPS× jemněji než pos
                 // drift, což snižuje truncation error close-encounteru.
-                //
-                // Rozdíl `not-align` vs `align` je jen v auto-joint chování (drainAndAutoJoint
-                // propaguje align flag) + jednorázový lock při switch módu/spawnu (viz $effect
-                // a onPointerDown). Sim loop body je identical — žádný per-tick reset.
                 for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
                   lastPE = stepGravityKickOnly(w, gp, SUB_DT).pe;
                 }
                 w.step(FIXED_DT);
+                break;
+
+              case 'align':
+                // Stage 3 — composite-driven kinematics. Stejný kick + Rapier step jako
+                // `not-align`, ale po Rapier kroku override pos/rot/linvel/angvel z
+                // aggregate state pro multi-pixel composity. Joint solver Rapieru
+                // konverguje approximativně, my pak enforce přesnou rigidní geometrii
+                // podle uložených offsetů (set v createFixedJoint align=true).
+                // Singleton composites (1 pixel, no joint) Rapier integruje normálně.
+                for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
+                  lastPE = stepGravityKickOnly(w, gp, SUB_DT).pe;
+                }
+                w.step(FIXED_DT);
+                stepCompositesAlign(w);
                 break;
             }
             // Auto-joint po Rapier kroku. `without-interaction` mode → eventQueue prázdná
@@ -565,10 +579,32 @@
           connectionCount = w.joints.length;
           const stats = computeObjectStats(w);
           objectCount = stats.count;
-          // Magnetic merge candidate detection (Stage 1 — pure detection, no merge yet).
-          // Volné hrany komponent v dosahu MAGNET_THRESHOLD se počítají jako kandidáty.
+          // Magnetic merge: detection (Stage 1) + apply (Stage 2). Per display tick (5 Hz).
+          // Volné hrany komponent v dosahu MAGNET_THRESHOLD jsou kandidáty na inelastic merge.
+          // Apply jen v `not-align`:
+          //   - `without-interaction`: Rapier step se nevolá → FixedJoint by visel bez efektu.
+          //   - `align`: position-snap mode konfliktní se Stage 2 position-preserving math
+          //     (Stage 2 sice zachová ∑P/∑L, ale geometrie zůstává na non-grid pozicích →
+          //     mix align + not-align jointů v 1 slepenci = broken cluster). Auto-joint
+          //     s align=true v align módu je jediná správná cesta, dokud Stage 3
+          //     (composite-driven kinematics) nenahradí FixedJoint úplně.
           const composites = buildComposites(w);
-          mergeCandidateCount = detectMergeCandidates(w, composites, MAGNET_THRESHOLD).length;
+          const candidates = detectMergeCandidates(w, composites, MAGNET_THRESHOLD);
+          mergeCandidateCount = candidates.length;
+          if (integration === 'not-align') {
+            // Consumed-set guard: v jednom display ticku každou komponentu mergni jen
+            // jednou (kdyby compA byla v candidate (A,B) i (A,C), apply na (A,B)
+            // změní A → kandidát (A,C) se přepočítá příští display tick z čerstvého
+            // composite stavu).
+            const consumed = new Set<number>();
+            for (const c of candidates) {
+              if (consumed.has(c.compA.id) || consumed.has(c.compB.id)) continue;
+              if (applyMerge(w, c)) {
+                consumed.add(c.compA.id);
+                consumed.add(c.compB.id);
+              }
+            }
+          }
           const d = computeDiagnostics(w);
           sumP = Math.hypot(d.px, d.py);
           sumL = d.L;

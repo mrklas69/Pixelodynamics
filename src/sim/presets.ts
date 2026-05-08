@@ -196,6 +196,51 @@ export const PRESETS: Preset[] = [
     stopAtTime: 10,
   },
   {
+    id: 'e12',
+    name: 'E12 — Magnet merge head-on (m=2 vs m=2)',
+    description:
+      '2 slepence m=2 head-on, axis-aligned, edges already in MAGNET_THRESHOLD při spawnu ' +
+      '(distance 0.098 U). Slow v=±0.05 → magnet trigger v prvním display ticku (~0.5 s) ' +
+      'PŘEDtím, než edges dosáhnou kontaktu (~0.98 s pro auto-joint). G=0, not-align, stop @ 3 s.\n' +
+      'Initial: ∑P=0, ∑L=0, KE=0.005. Po inelastic merge: V_new=0, ω_new=0 → KE_after=0 ' +
+      '(100% loss, head-on perfectně inelastic). Konzervace ∑P=0 ✓, ∑L=0 ✓.',
+    setup: (api) => {
+      api.setIntegration('not-align');
+      api.setG(0);
+      api.setUseGrid(false);
+      // Slepenec A: pixely (-1.549, 0) a (-0.549, 0). A.right edge střed v (-0.049, 0).
+      const a0 = api.spawn(-1.549, 0, +0.05, 0, 0, 0, 1, false);
+      const a1 = api.spawn(-0.549, 0, +0.05, 0, 0, 0, 1, false);
+      api.connect(a0, a1);
+      // Slepenec B: pixely (+0.549, 0) a (+1.549, 0). B.left edge střed v (+0.049, 0).
+      // Edge-to-edge distance = 0.098 < MAGNET_THRESHOLD = 0.1.
+      const b0 = api.spawn(+0.549, 0, -0.05, 0, 0, 0, 1, false);
+      const b1 = api.spawn(+1.549, 0, -0.05, 0, 0, 0, 1, false);
+      api.connect(b0, b1);
+    },
+    stopAtTime: 3,
+  },
+  {
+    id: 'e13',
+    name: 'E13 — Magnet merge tečně (offset → spin emerge)',
+    description:
+      '2 single pixely letí proti sobě tečně s drobným Y offset (±0.05). Edges already ' +
+      'in MAGNET_THRESHOLD (segment distance 0.098 U). Slow v=±0.05 → magnet trigger ' +
+      'před auto-jointem. G=0, not-align, stop @ 3 s.\n' +
+      'Initial: ∑P=0, ∑L=−0.005 (offset orbital momentum), KE=0.0025. Po inelastic merge: ' +
+      'V_new=0, ω_new=L/I≈−0.0053 → spin EMERGE z čistě translačního pohybu. ' +
+      'Test ∑L preservation: |∑L_after| ≈ 0.005 ✓, ne nula. KE_after ≈ 1e-5 (99.5% loss, ' +
+      'většina KE rozplýtvána, malý zbytek v rotaci).',
+    setup: (api) => {
+      api.setIntegration('not-align');
+      api.setG(0);
+      api.setUseGrid(false);
+      api.spawn(-0.549, +0.05, +0.05, 0, 0, 0, 1, false);
+      api.spawn(+0.549, -0.05, -0.05, 0, 0, 0, 1, false);
+    },
+    stopAtTime: 3,
+  },
+  {
     id: 'g1024',
     name: 'Grid 1024 — 32×32 čtverec',
     description:

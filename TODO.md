@@ -1,6 +1,6 @@
 # TODO
 
-Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
+Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo.
 
 ## Fáze 2 — pixelová gravitace
 
@@ -26,10 +26,13 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] Detekce „dotyku po straně" — sezení 10. `AUTO_JOINT_ON_CONTACT=true` v `params.ts`, collision groups + ActiveEvents na všech pixelech, drainAndAutoJoint v main loopu, `setContactsEnabled(false)` na joint (řeší E3 drift z dual constraint). γ flag zohledňuje auto-joint (rapier.step() musí běžet pro broadphase). E10 head-on + E11 trio empiricky validovány.
 - [x] Edge case: jeden pixel slepený se 2+ sousedy → struktura, ne řetězec. E11 ověřilo: prostřední pixel má 2 jointy (-X +X bity = 3 v edge mask), edge mask renderer to už podporoval ze sezení 8.
 - [x] **Composite object dataset (Stage 1)** — sezení 11. `src/sim/composite.ts`: Composite type (id, members, com, linvel, angvel, mass, inertia s parallel axis theorem), buildComposites přes Union-Find, freeEdges (4 strany pixelu mínus shared via joint anchor dominantní osa), segmentDistance (Christer Ericson §5.1.9), detectMergeCandidates per-pair edge proximity. Per-display-tick (5 Hz) call, "Merge cand." badge v STATS. **Detection only, no merge yet.**
-- [~] **Magnetic merge Stage 2** — inelastic merge math. V_new = ∑P/M_total, ω_new = ∑L_rel_new_CoM / I_new. Pos pixelů = new_CoM + R(orientation) · offset_local. Apply per nejbližší candidate.
-- [ ] **Magnetic merge Stage 3** — composite-driven kinematics nahrazující FixedJoint v align režimu. Per-tick aggregate forces/torques → V/ω → CoM/orientation; pixel pos derived.
+- [x] **Magnetic merge Stage 2** — sezení 12. `applyMerge(world, candidate)` v `composite.ts`: M_new, CoM_new, V_new, ω_new přes parallel axis theorem. Snap pixel linvel/angvel na rigid-body kinematics, create FixedJoint mezi candidate edge pair. Skip pinned, gate `integration === 'not-align'` (magnet+align konflikt position-preserving vs position-snapping). E12 (head-on m=2 vs m=2, ∑P=0/∑L=0/KE=0) + E13 (tečně offset, spin emerge ω≈-0.0053, ∑L=-0.005 preserved do f32 ulp) verified.
+- [x] **Magnetic merge Stage 3 MVP** — sezení 12. `Pixel.compositeOffsetX/Y` (stable local offset v composite frame), `recomputeCompositeOffsets` v `createFixedJoint(align=true)` BFS přes joints po pos/rot snap, `stepCompositesAlign(world)` po Rapier step override pos/rot/linvel/angvel z aggregate state. 6-pixel chain v G=20 po 60 s: 1.000 U distances přesně, composite rotates synchronně (joint solver dodá angular impulsy přes lockRotations).
+- [ ] **Magnetic merge Stage 3.1** — chain-merge re-align: pokud 2 multi-pixel chains se spojí auto-jointem (case "oba s jointy → no pos snap"), re-snapnout obě chains na 1U grid. Fixne uživatelův původní cluster bug z S11/S12.
+- [ ] **Magnetic merge Stage 3.2** — composite rotation explicit handling: odstranit `lockRotations(true)` v align mode, explicitně drive θ přes `setAngvel` + manuální drift v `stepCompositesAlign`. Aktuálně rotace funguje empiricky přes joint solver impulses, ne čistě architektonicky.
+- [ ] **Magnet merge re-aktivace v align mode** — po Stage 3.1/3.2: applyMerge spočítá novou composite state + recomputeOffsets postará o geometrii.
 - [x] Wire up Largest counter do STATS — sezení 11. `computeObjectStats` rozšířen o `largest: { repId, size }`, facts.computeFacts dostává jako param.
-- [ ] Hover infotipy rozšířit na CompositeObject (až bude Stage 3)
+- [ ] Hover infotipy rozšířit na CompositeObject (až bude magnetic merge Stage 3 — composite-driven kinematics)
 - [ ] **E12** — pair-to-pair collision empirický test (carry-over ze sezení 10)
 
 ## Fáze 4 — hmotnost a pružnost

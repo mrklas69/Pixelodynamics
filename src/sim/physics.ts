@@ -131,7 +131,14 @@ export class World {
       .setDensity(1);
     const collider = this.rapier.createCollider(colliderDesc, body);
 
-    const pixel: Pixel = { id: nextId++, body, m, pinned };
+    const pixel: Pixel = {
+      id: nextId++,
+      body,
+      m,
+      pinned,
+      compositeOffsetX: null,
+      compositeOffsetY: null,
+    };
     this.pixels.push(pixel);
     this.pixelByCollider.set(collider.handle, pixel);
     return pixel;

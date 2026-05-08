@@ -1,6 +1,8 @@
 # Pixelodynamics
 
-Webová sandbox simulace dynamiky **pixelů** — čtvercových rigid bodies o jednotkové straně, které se postupně učí gravitovat, lepit se po hranách, deformovat pružinou, lámat se a roztrhávat při překročení napěťového prahu. Cíl je experimentální: zjistit, kolik emergentního chování se vejde do co nejmenší sady pravidel. Není to produkt.
+Webová sandbox simulace dynamiky **pixelů** — čtvercových rigid bodies o jednotkové straně, které se postupně učí gravitovat, lepit se po hranách, deformovat se pružinou, lámat se a roztrhávat při překročení napěťového prahu. Cíl je experimentální: zjistit, kolik emergentního chování se vejde do co nejmenší sady pravidel. Není to produkt.
+
+Live demo: <https://mrklas69.github.io/Pixelodynamics/>
 
 ## Stack
 
@@ -22,14 +24,14 @@ Detailní popis fyzikálního modelu (rovnice, softening, integrátor, units) je
 |---|---|---|
 | 1 — FVP | Ballistický pohyb + rotace, LMB spawn, kamera (WASD + zoom), bez interakcí | hotovo |
 | 2 | Párová Newtonova gravitace (Plummer softening), manuální symplektický Euler, STATS+FACTS UI | hotovo |
-| 3 | Slepování po hraně přes `FixedJoint` | — |
+| 3 | Slepování po hraně přes `FixedJoint` (Stage 3a auto-jointing + composite dataset Stage 1) | rozděláno |
 | 4 | Hmotnost a pružnost (distance/spring joints, density) | — |
 | 5 | Rozbití slepence při překročení impulse threshold | — |
 | 6+ | Barvy = různé fyzikální parametry, druhy částic, magnetismus, teplota | — |
 
-Otevřená architektonická volba pro fázi 3 (orchestrace manual gravity + Rapier `step()`): tři varianty α/β/γ zaznamenané v `IDEAS.md`, rozhodnutí padne na reálném joint scénáři.
+Hybrid orchestrace pro fázi 3 byla vyřešena Velocity-Verlet split modelem (`not-align` mode, dříve `hybrid-α`): manuální gravita dělá `kick`, Rapier dělá `drift` + joint solver. Detail v `IDEAS.md` (lessons learned) a `DONE.md` (sezení 8–11).
 
-## Status conservation laws (manual mód, fáze 2)
+## Status conservation laws (`without-interaction` mód, fáze 2)
 
 | Veličina | Drift po 60 s, N=12 | Floor |
 |---|---|---|
@@ -37,9 +39,9 @@ Otevřená architektonická volba pro fázi 3 (orchestrace manual gravity + Rapi
 | ∑L (úhlová hybnost) | ~ 1e-16 | f64 epsilon |
 | KE (kinetická energie) | osciluje s PE, bez sekulárního trendu | symplektický integrátor |
 
-Hybrid mode (manual gravity + Rapier `step()`) má drift ∑P/∑L o 10⁴× horší kvůli f32 bridge přes WASM. Detail v `docs/diary/2026-05-07.md` (sezení 3, experiment E5 vs. E5m).
+`not-align` mode (Velocity-Verlet split: manual `kick`, Rapier `drift` + joint solver) drží ∑P/∑L na úrovni f32 ulp (~1e-7), ∑E drift 0.04 % / 30 s na E8 sweep. Naivní hybrid bez splitu (sezení 3, E5 vs. E5m) integroval pohyb dvakrát a byl odmítnut.
 
-## Performance (manual mód, O(N²) gravita, G=1)
+## Performance (`without-interaction` mód, O(N²) gravita, G=1)
 
 | N | Páry | FPS |
 |---|---|---|
@@ -70,9 +72,9 @@ npm run check    # svelte-check + tsc
 | Lock kamery na pixel | klik na `#ID` ve FACTS |
 | Odemknout kameru | <kbd>Esc</kbd> nebo pan |
 | Hover info | najetí kurzorem na pixel |
-| Reset scény | tlačítko v SETTINGS |
+| Clear scény | tlačítko `Clear` v COMMANDS |
 | Preset experiment | tlačítko v PRESETS |
-| Export modelshotu | tlačítko `📋 Export JSON` |
+| Export modelshotu | tlačítko `📋 Export JSON` v COMMANDS |
 
 ## Konvence
 
@@ -87,9 +89,10 @@ npm run check    # svelte-check + tsc
 
 ```
 src/
-  sim/         fyzika, gravitace, integrátor, presety, diagnostika
+  sim/         fyzika, gravitace, integrátor, jointy, presety, composite dataset, diagnostika
   render/      WebGL2 renderer, kamera
   input/       klávesnice
+  audio/       SFX pool (click pro joint create/break, spawn pro LMB)
   ui/          Svelte panely, formátování, tooltip
 docs/
   MODEL.md     formální popis fyzikálního modelu

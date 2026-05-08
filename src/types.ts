@@ -22,6 +22,14 @@ export type Pixel = {
    * kde nás zajímá dynamika **třetího** tělesa v zadaném potenciálu.
    */
   pinned: boolean;
+  /**
+   * Stage 3 (align mode composite-driven kinematics) — local offset pixelu v composite
+   * frame. Stable across ticks, set při joint create / merge, použito v `stepCompositesAlign`
+   * pro pos = CoM + R(θ)·offset. `null` pro singletony (1-pixel composites integrované
+   * Rapierem normálně).
+   */
+  compositeOffsetX: number | null;
+  compositeOffsetY: number | null;
 };
 
 /** Stav kamery — pan a zoom v jednoduché 2D ortografické projekci. */

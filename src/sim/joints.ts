@@ -171,7 +171,79 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
   const joint: Joint = { id: nextJointId++, a, b, anchorA, anchorB, rapier };
   world.joints.push(joint);
   playClick();
+
+  // Stage 3 (composite-driven kinematics v align mode): po pos/rot snap a vložení jointu
+  // recompute offsets pro celou nově joined komponentu. Offset = R(-θ)·(pos − CoM) v
+  // composite frame; θ = pixel rotation (po align snap = 0, pro chains = anchor θ).
+  // V `not-align` mode offsety nepoužíváme — necháváme null (Stage 3 stepCompositesAlign
+  // je no-op pro `not-align`).
+  if (align) {
+    recomputeCompositeOffsets(world, a);
+  }
+
   return joint;
+}
+
+/**
+ * BFS po jointech najde všechny pixely v komponentě obsahující `seed`. Použito po
+ * createFixedJoint(align=true) pro recompute compositeOffsetX/Y po změně topologie.
+ */
+function collectComponent(world: World, seed: Pixel): Pixel[] {
+  const visited = new Set<Pixel>();
+  visited.add(seed);
+  const queue: Pixel[] = [seed];
+  while (queue.length > 0) {
+    const p = queue.shift()!;
+    for (const j of world.joints) {
+      const other = j.a === p ? j.b : j.b === p ? j.a : null;
+      if (other && !visited.has(other)) {
+        visited.add(other);
+        queue.push(other);
+      }
+    }
+  }
+  return [...visited];
+}
+
+/**
+ * Recompute `compositeOffsetX/Y` pro všechny členy komponenty obsahující `seed`. Volat
+ * po změně topologie (nový joint v align mode, magnet merge). Singleton (1 člen) → null.
+ *
+ * Frame: θ = `seed.body.rotation()` (po align snap = 0; pro chains se připojí fresh
+ * pixel s r=0 nebo merge přes chains s nějakým θ — všichni members mají stejné r dík
+ * lockRotations + manual setRotation). Offset = R(−θ)·(pos − CoM).
+ */
+function recomputeCompositeOffsets(world: World, seed: Pixel): void {
+  const members = collectComponent(world, seed);
+  if (members.length < 2) {
+    seed.compositeOffsetX = null;
+    seed.compositeOffsetY = null;
+    return;
+  }
+
+  let M = 0;
+  let cx = 0;
+  let cy = 0;
+  for (const p of members) {
+    const t = p.body.translation();
+    M += p.m;
+    cx += p.m * t.x;
+    cy += p.m * t.y;
+  }
+  if (M <= 0) return;
+  cx /= M;
+  cy /= M;
+
+  const theta = seed.body.rotation();
+  const cosT = Math.cos(theta);
+  const sinT = Math.sin(theta);
+  for (const p of members) {
+    const t = p.body.translation();
+    const dx = t.x - cx;
+    const dy = t.y - cy;
+    p.compositeOffsetX = cosT * dx + sinT * dy;
+    p.compositeOffsetY = -sinT * dx + cosT * dy;
+  }
 }
 
 /**
