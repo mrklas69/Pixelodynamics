@@ -33,7 +33,8 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo.
 - [x] **Magnet merge re-aktivace v align mode** — sezení 14. `applyMerge(world, candidate, align)` rozšířen o flag; v align cestě deleguje na `createFixedJoint(..., true)` (Stage 3.1 chain-merge), v not-align cestě beze změny (Stage 2 ∑P+∑L preserved). Auto-joint a magnet sdílí jednu cestu v align mode.
 - [x] Wire up Largest counter do STATS — sezení 11. `computeObjectStats` rozšířen o `largest: { repId, size }`, facts.computeFacts dostává jako param.
 - [x] Hover infotipy rozšířit na CompositeObject — sezení 14. `computeCompositeFor(world, seed)` v composite.ts (BFS, `Composite | null`), tooltip rozšířen o sekci "Slepenec (N×)" s M, CoM, V, |V|, ω.
-- [ ] **E12** — pair-to-pair collision empirický test (carry-over ze sezení 10)
+- [x] **E12** — pair-to-pair collision empirický test (sezení 15). Modelshot 2 chainy m=2 head-on po 3.02 s: 4 pixely všechny v klidu, distance 1.0 U mezi sousedy, ∑P=0, ∑L=0, KE=0 (100% inelastic head-on). ∑P/∑L preserved.
+- [x] **E15** — align rotation test (sezení 15). Synthetic injection ω=+1 na chain m=3 po assembly v align (connect zničí ω paradigmaticky → ruční restore přes Pixel.body). Po 10 s: distance(p0,p1)=distance(p1,p2)=1.000 U přesně, compositeTheta sdíleně všemi members (r=-2.5733 ≡ θ=-2.566 + 7e-3 integration error). ω drift -0.14 %/10 s (systematic dissipace, ne ulp), KE drift -0.28 %/10 s konzistentní (KE = ½·I·ω²). Stage 3.2 explicit theta authoritative ✓.
 - [x] **E14 modelshot validace** — sezení 14. První modelshot odhalil 2 critical bugy v S13 Stage 3.1; po fixech (autoJointAlign endpoint picking + connect propaguje align flag) modelshot ✓ 6-pixel chain (-2.5..+2.5), CoM≈(0,0), ∑P=10⁻⁷, ω=10⁻⁵, KE=10⁻¹⁵.
 
 ## Fáze 4 — hmotnost a pružnost

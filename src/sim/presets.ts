@@ -265,6 +265,45 @@ export const PRESETS: Preset[] = [
     stopAtTime: 8,
   },
   {
+    id: 'e15',
+    name: 'E15 — Align rotation test (chain m=3, ω=+1, synthetic)',
+    description:
+      'Synthetic test Stage 3.2 explicit theta drift na ω≠0 v align mode, G=0.\n' +
+      'Chain m=3 sestavený v align modu: pixely (-1, 0), (0, 0), (+1, 0). createFixedJoint' +
+      '(align=true) má ω=0 paradigm — fresh-fresh setAngvel(0), fresh+chain velocity ' +
+      'unification → po `connect()` všechny linvel=0, angvel=0. Naturally tedy v current ' +
+      'architektuře nelze v align mode vyrobit composite s ω≠0 (magnet, auto-joint, preset ' +
+      'connect — všichni přes stejnou cestu).\n' +
+      'Synthetic injection: po assembly přímo přes `Pixel.body` nastavíme rigid-body ' +
+      'initial state (linvel = ω × r_rel, angvel = ω). Simuluje budoucí Fázi 4+ trigger ' +
+      '(external impulse). Stage 3.2 první display tick: c.angvel = L/I = 2.5/2.5 = 1 → ' +
+      'compositeTheta drift přes ω·dt.\n' +
+      'Initial: ∑P=0, ∑L=2.5, KE=1.25. Stop @ 10 s. Po 10 s: θ ≈ 10 rad ≈ 1.59 otáček. ' +
+      'distance(p0,p1) = distance(p1,p2) = 1.000 U přesně (compositeTheta sdílen). ' +
+      'Individual `r` členů = θ_composite. ω drift ≈ f32 ulp. ∑P/∑L/KE preserved.',
+    setup: (api) => {
+      api.setIntegration('align');
+      api.setG(0);
+      api.setUseGrid(false);
+      const omega = 1;
+      // Spawn s nulovými velocities — connect v align modu je stejně zničí.
+      const p0 = api.spawn(-1, 0, 0, 0, 0, 0, 1, false);
+      const p1 = api.spawn(0, 0, 0, 0, 0, 0, 1, false);
+      const p2 = api.spawn(+1, 0, 0, 0, 0, 0, 1, false);
+      api.connect(p0, p1);
+      api.connect(p1, p2);
+      // Synthetic injection — rigid rotation kolem CoM=(0,0) s ω=+1 rad/s.
+      // v = ω × r_rel: v 2D vx=-ω·y_rel, vy=+ω·x_rel. CoM=(0,0), r_rel=(x,0) → vx=0, vy=ω·x.
+      p0.body.setLinvel({ x: 0, y: omega * -1 }, true);
+      p1.body.setLinvel({ x: 0, y: 0 }, true);
+      p2.body.setLinvel({ x: 0, y: omega * +1 }, true);
+      p0.body.setAngvel(omega, true);
+      p1.body.setAngvel(omega, true);
+      p2.body.setAngvel(omega, true);
+    },
+    stopAtTime: 10,
+  },
+  {
     id: 'g100',
     name: 'Grid 100 — 10×10 čtverec',
     description:

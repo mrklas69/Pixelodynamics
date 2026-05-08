@@ -1,5 +1,20 @@
 # DONE
 
+## 2026-05-08 — Sezení 15: E12 carry-over PASS + E15 align rotation test (synthetic ω injection)
+
+- **E12 modelshot PASS** (carry-over ze S10): 2 chainy m=2 head-on, magnet merge, simTime 3.02 s. 4 pixely v klidu na linii spacing 1.0 U, ∑P=0, ∑L=0, KE=0 (100 % inelastic head-on loss). TODO `[ ]` → `[x]`.
+- **E15 — synthetic ω injection v align mode** v `src/sim/presets.ts` (+30 řádků):
+  - Nový preset `e15` mezi `e14` a `g100`. Chain m=3 v (-1, 0), (0, 0), (+1, 0); spawn s nulovými velocities, dva `connect` v align modu, pak ruční rigid-body kinematics přes `pX.body.setLinvel/setAngvel` (vy=ω·x_rel, rs=ω; ω=+1 rad/s).
+  - Důvod synthetic: 1. iterace presetu odhalila, že `createFixedJoint(align=true)` má ω=0 paradigm — fresh-fresh `setAngvel(0)`, fresh+chain velocity unification. V current architektuře **není** naturální cesta dostat composite s ω≠0 v align mode. Stage 3.2 explicit theta drift je defensive mechanika pro Fázi 4+ external impulse trigger.
+  - Description označuje preset jako "synthetic", popisuje architectural limit + co testuje.
+- **E15 modelshot PASS:**
+  - Distance preserve: d(p0,p1) = d(p1,p2) = 1.000 U přesně, d(p0,p2) = 2.000 U.
+  - compositeTheta sdílení: r všech 3 pixelů identicky -2.5733 rad ≡ θ = -2.566 + 7×10⁻³ integration error/10 s.
+  - rs sdílení: všichni 0.99860 identicky.
+  - ∑P drift: 2×10⁻⁵ (f32 ulp accumulation přes ~24000 substeps).
+  - ∑L drift -0.14 %/10 s, KE drift -0.28 %/10 s — konzistentní s δKE/KE = 2·δω/ω. **Systematic ω drift** (ne ulp): zápis do IDEAS jako kandidát na refactor "Stage 3.2 ω explicit drive" (Pixel.compositeAngvel + event-driven update místo per-tick aggregate read).
+- `npm run check`: 0 errors, 0 warnings.
+
 ## 2026-05-08 — Sezení 14: E14 validace odhalila 2 bugy + Stage 3.2 + magnet re-aktivace v align + hover slepenec + UI polish
 
 - **Bug fix #1 — autoJointAlign endpoint picking** v `src/sim/joints.ts`:

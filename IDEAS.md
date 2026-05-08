@@ -47,6 +47,16 @@ Současný `align` mode v `createFixedJoint` snapuje `r=0` jen na 2 pixelech (a,
 
 **Proper fix vyžaduje magnetic merge Stage 3** — composite-driven model nahrazuje FixedJoint anchor calc, takže "snap rotace" se stane součástí merge step (re-orient celé komponenty kolem CoM_new), ne per-pixel destruktivní operace.
 
+### Stage 3.2 ω drift v align mode (sezení 15 → IDEAS)
+
+E15 odhalil systematic ω drift -0.14 %/10 s v align mode pro G=0 izolaci (žádné externí síly). Není to f32 ulp (ulp by měl random sign), je to dissipativní efekt: Rapier joint solver iteruje pos correction impulsy (constraint violation z linear extrapolace v drift kroku), které lehce mění L; `computeAggregate` v dalším ticku čte post-solver state → `c.angvel = L/I` lehce klesá. Stage 3.2 pak driveuje `θ_new = θ_old + c.angvel·dt`, takže drift se promítne do θ.
+
+Pro current fáze (krátké experimenty < 30 s) zanedbatelné. Pro Fáze 6+ long-run scénáře (rotující prsten v gravitě, "tři kupy") by 1 %/min mohlo být patrné.
+
+**Možný refactor:** ω driveuovat **explicitně** (jako θ) — uložit `Pixel.compositeAngvel: number | null` (sdílen jako compositeTheta), updateovat **pouze** přes external impulses (kontaktní eventy, magnet inelastic merge), ne přes per-tick aggregate read. Pak `c.angvel` v `stepCompositesAlign` čteme z compositeAngvel místo computeAggregate.
+
+Cena: dvě authoritative state (θ + ω) místo jednoho. Compute order: θ_new = θ_old + ω_old·dt; ω se mění **jen** v event-driven cestách. Trade-off: čistší konzervace vs. komplexnější update path. Nech na později, až bude trigger (long-run scénář, kde drift bolí).
+
 ### Hard cutoff isolation (sezení 11 → IDEAS)
 
 Pixel mimo `cutoff = ε · cutoffFactor` od všech sousedů zamrzne (force=0 přesně, žádné "weak attraction"). Není to bug, ale model UX překvapení (uživatel intuitivně čeká `1/r²` všude, ale grid je culling decision).
