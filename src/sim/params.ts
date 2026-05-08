@@ -59,6 +59,17 @@ export const GRAVITY_CUTOFF_FACTOR = 5.0;
 export const SKIP_RAPIER_IF_NO_JOINTS = true;
 
 /**
+ * Auto-detekce dotyku po straně (sezení 10): při Rapier collision Started event mezi
+ * dvojicí pixelů se automaticky vytvoří FixedJoint (pokud ještě neexistuje). `false`
+ * vrací chování fáze 3 entry (jen manuální 🔗 tlačítko / preset connect).
+ *
+ * Důsledek: po `✂ Rozpojit vše` se pixely v kontaktu okamžitě znovu slepí, dokud
+ * je něco neodstrčí. Pro experimentální reprodukovatelnost (presety předpokládající
+ * nezávislé pixely během kolapsu — E5 hybrid-naive) lze flag dočasně shodit.
+ */
+export const AUTO_JOINT_ON_CONTACT = true;
+
+/**
  * Šířka smoothstep transition zone v U na vnitřním okraji cutoffu.
  * Window W(r) = 1 pro r ≤ cutoff − tailWidth, plynule klesá k 0 na r = cutoff
  * 3-2 polynomem `1 - (3t² - 2t³)`, t = (r − r_inner) / tailWidth.

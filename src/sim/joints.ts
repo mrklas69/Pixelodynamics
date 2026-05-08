@@ -67,6 +67,13 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel): Joint {
   // current relative orientation: frame1 = r_B − r_A, frame2 = 0.
   const data = RAPIER.JointData.fixed(anchorA, rb - ra, anchorB, 0);
   const rapier = world.rapier.createImpulseJoint(data, a.body, b.body, true);
+  // Vypni contacts mezi joined bodies. Default Rapieru contacts dual-řeší (joint
+  // pos constraint + narrow-phase contact normal) a navzájem si škvaří energii —
+  // sezení 10 E3 drift -11.5% vs sezení 8 baseline 0.03% při zapnutí collisionGroups.
+  // Pro lepené pixely je joint **jediná** autorita nad relativní pozicí.
+  // Cast — rapier 2D-compat má `setContactsEnabled` na ImpulseJoint, ale typ vrací
+  // `unknown` v některých helper signaturách; přístup přes RAPIER.ImpulseJoint je v pořádku.
+  rapier.setContactsEnabled(false);
 
   const joint: Joint = { id: nextJointId++, a, b, anchorA, anchorB, rapier };
   world.joints.push(joint);

@@ -23,8 +23,8 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] **Manuální connect/disconnect tlačítka** — 🔗 Spojit poslední 2, ✂ Rozpojit vše (sezení 8). Pro testovací scénáře bez kontaktové detekce.
 - [x] **Default `canSleep=false`** — sezení 8. Sleep mode v Rapieru způsobil 100% dissipaci joint dynamics v default E3 baseline. Není potřeba pro fyzikální sandbox.
 - [x] **Hybrid orchestrace** — Stage 2 hotová (sezení 9). E8r/E8α/E8β sweep: **α (Velocity-Verlet split) winner** — ∑E drift 0.04 %/30 s, joint distance preserve, rs=0.32 (gravita-induced precesní moment). β (save-zero-restore) broken — ∑E drift 13 %, rs ≈ 0 (joint solver nevidí stress). γ (SKIP_RAPIER_IF_NO_JOINTS) jako orthogonal flag, default true. UI default integration mode změněn na `hybrid-α`.
-- [ ] Detekce „dotyku po straně" — collisionGroups zapnout, contact event listener, auto-`createFixedJoint`. Bez tohoto je slepování jen manuální (tlačítkem nebo presetem).
-- [ ] Edge case: jeden pixel slepený se 2+ sousedy → struktura, ne řetězec. Edge mask už podporuje N+E+S+W současně, fáze 3 detekce by jen plnila víc bitů.
+- [x] Detekce „dotyku po straně" — sezení 10. `AUTO_JOINT_ON_CONTACT=true` v `params.ts`, collision groups + ActiveEvents na všech pixelech, drainAndAutoJoint v main loopu, `setContactsEnabled(false)` na joint (řeší E3 drift z dual constraint). γ flag zohledňuje auto-joint (rapier.step() musí běžet pro broadphase). E10 head-on + E11 trio empiricky validovány.
+- [x] Edge case: jeden pixel slepený se 2+ sousedy → struktura, ne řetězec. E11 ověřilo: prostřední pixel má 2 jointy (-X +X bity = 3 v edge mask), edge mask renderer to už podporoval ze sezení 8.
 - [ ] **Composite object dataset** (viz IDEAS.md) — `id, pixelIds, x, y, vx, vy, r, rs, m, I`. Update centroidu při změně topologie nebo per-tick.
 - [ ] Wire up Largest counter do STATS — až budou composite objects.
 - [ ] Hover infotipy rozšířit na CompositeObject (až budou)
@@ -52,8 +52,9 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] Patička (centrovaná, dvouřádková, název aplikace + licence + repo)
 - [x] Pixely jako rámečky (hybrid border max(0.05U, 1px), připraveno pro vis. spojů)
 - [x] Hover infotipy nad pixely (id, x, y, vx, vy, r, rs, m, |v|)
-- [ ] Largest (Most-pixels-in-object) — až budou objekty
-- [ ] Connections counter — až budou jointy
+- [ ] Largest (Most-pixels-in-object) — až bude composite object dataset (sezení 10 přidalo `computeObjectCount` Union-Find, ale nemá per-object enumeraci pro pixel count championa)
+- [x] Connections counter — sezení 8 (manuální), sezení 10 (auto-joint reaguje)
+- [x] Objects counter — sezení 10. `computeObjectCount(world)` přes Union-Find s path compression a union by size. O((N+J)·α). Wire-up v display ticku + reset.
 - [x] Total energy E = KE + PE — sezení 6: ∑E + Δ∑E v STATS panelu, E₀ se zachytí při prvním display ticku po prvním sim kroku (PE platná). KE rozšířena o rotační složku ½·I·ω² (I=m/6).
 - [x] Vyhodnotit `GRAVITY_CUTOFF_FACTOR` — sezení 7. Benchmark M(PB1000, c={5,8,10}, t={5,10,20,30}) odhalil **density-bound strop**: po kolapsu shluku všechny cutoffy konvergují na 20 FPS bez ohledu na hodnotu. Default c=5 zůstává. Pro fázi 6+ rozprostřený plyn (rovnoměrná density) lze klidně zvýšit na 8-10. Slider `cutoff` v SETTINGS pro live tuning.
 

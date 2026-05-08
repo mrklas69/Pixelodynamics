@@ -1,5 +1,22 @@
 # DONE
 
+## 2026-05-08 — Sezení 10: Stage 3a — auto-jointing při kontaktu, object counter
+
+- **`AUTO_JOINT_ON_CONTACT=true`** (`src/sim/params.ts`) — toggle pro auto-detekci dotyku po straně. Při Rapier collision Started event mezi dvěma pixely se automaticky vytvoří FixedJoint (s duplicate guard).
+- **Collision groups + ActiveEvents** (`src/sim/physics.ts`) — `setCollisionGroups(0xFFFFFFFF)` (všechny páry), `setActiveEvents(COLLISION_EVENTS)`. `pixelByCollider: Map<number, Pixel>` pro O(1) lookup z handle. Sdílená `EventQueue` v `init()`. Nová `drainContactStarts(callback)` abstrahuje drain Started events.
+- **Auto-joint helper v main loopu** (`src/ui/App.svelte`) — `drainAndAutoJoint()` po každé switch větvi, duplicate guard přes lineární scan v `world.joints`.
+- **`setContactsEnabled(false)` na joint** (`src/sim/joints.ts`) — Rapier default řeší contact normal force paralelně s joint constraint, což škvaří energii (E3 drift -11.5 % vs. sezení 8 baseline 0.03 %). Vypnutím contact mezi joined bodies má joint solver autoritu nad rel pozicí — drift se vrátil na sezení 8/9 baseline.
+- **γ flag zohledňuje AUTO_JOINT** — `skipRapier = SKIP_RAPIER_IF_NO_JOINTS && joints.length === 0 && !AUTO_JOINT_ON_CONTACT`. Bez tohoto fixu hybrid-α s prázdným `joints[]` skipoval `rapier.step()`, broadphase neaktualizovala, contact events nikdy nefíruly. Pro pure 'manual' mode auto-joint inertní (rapier.step() se nikdy nevolá) — žádná regrese.
+- **Object counter** (`src/sim/diagnostics.ts`) — `computeObjectCount(world)` přes Union-Find s path compression a union by size. O((N+J)·α) per display tick. Wire-up v App.svelte (display tick + reset). `objectCount` v STATS panelu (do té doby hardcoded 0).
+- **Preset E10 — Auto-joint head-on** — 2 pixely v (-2, 0) a (+2, 0), vx=±0.5, G=0. V t≈3 s contact, KE→0 (default restitution=0), auto-joint, slepenec stojí. Stop @ 8 s.
+- **Preset E11 — Auto-joint trio (gravity)** — 3 pixely v řadě (-2, 0), (0, 0), (+2, 0), G=1. Gravitace přitáhne sousedy → 2 jointy v řetězci, KE=5.5e-17, finální distance 1 U mezi sousedy. Edge mask test (prostřední pixel red na obou stranách).
+- **PB1000 perf test** — auto-joint ON + setContactsEnabled false: FPS 58 po 11 s (vs. sezení 7 baseline 20 FPS post-collapse v `manual` modu). Akceptovatelné, žádný catastrophic hit.
+- **Test E3 / E8α regression** — bit-identický s baseline sezení 8/9. `setContactsEnabled(false)` izoloval joint solver od contact response.
+- **Lessons learned (z censure):**
+  - Bug 1 (E10 contacts nefíruly): γ flag skipoval `rapier.step()` bez jointů → broadphase neaktualizovala. Auto-joint vyžaduje broadphase běh, takže γ flag musel zohlednit `AUTO_JOINT_ON_CONTACT`. **Side-effect dependency** — orthogonal optimization (γ) přestala být orthogonal, jakmile se přidal feature, který vyžaduje rapier.step().
+  - Bug 2 (E3 drift): zapnutí collision groups aktivovalo contact response **paralelně** s joint constraint, což si škvařivě interferovalo. **Default behavior konfliktů**: Rapier řeší contact i mezi connected bodies, dokud `setContactsEnabled(false)` nezvedl konflikt. API má fix, ale je to non-default — nutné aktivně volat.
+  - ✂ Rozpojit + auto-joint: po removeJoint Rapier emituje Started event (pixely jsou z jeho pohledu znovu samostatné v kontaktu) → joint se vrátí. Empiricky potvrzeno (uživatel test). Logický důsledek volby "hned při kontaktu" — vlastnost, ne bug.
+
 ## 2026-05-08 — Sezení 9: Stage 2 hybrid orchestrace — α etablováno jako default
 
 - **`IntegrationMode` rozšířen** z `'manual' | 'rapier' | 'hybrid'` na **`'manual' | 'rapier' | 'hybrid-naive' | 'hybrid-α' | 'hybrid-β'`** (`src/sim/presets.ts`). Stávající E5 přepsán na `'hybrid-naive'` (zachování experimentální historie).

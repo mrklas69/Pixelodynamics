@@ -4,6 +4,10 @@ Surové nápady. `→ TODO` značí, že je nápad zralý a přesunutý do `TODO
 
 ## Architektura
 
+### Auto-jointing edge case: pair-to-pair collision (sezení 10 → IDEAS)
+
+Když dva slepence (každý m≥2) se srazí, contact event vzniká **mezi dvěma pixely**, jeden v slepenci A, druhý v B. Současný `drainAndAutoJoint` automaticky vytvoří joint mezi nimi → ze 2 slepenců 1 větší. Logika je správná (duplicate guard se týká pixel pair, ne object pair), ale **empirický test chybí** — preset E12 = 2 head-on slepence m=2 by potvrdil. Edge mask by měl reflektovat nový joint na styčných hranách obou slepenců.
+
 ### Composite object dataset (fáze 3+)
 
 Cache pre-computed state pro každý slepený objekt. Důvod: každý tick nepřepočítávat těžiště, momenty atd. — jen když se změní topologie (přibude/odejde pixel z objektu).

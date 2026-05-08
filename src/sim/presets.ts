@@ -124,6 +124,35 @@ export const PRESETS: Preset[] = [
   },
   ...e8Variants(),
   {
+    id: 'e10',
+    name: 'E10 — Auto-joint head-on',
+    description:
+      '2 pixely v (-2, 0) a (+2, 0), vx=±0.5 (head-on), G=0. Při dotyku se mají automaticky slepit (collision Started → createFixedJoint). Po kontaktu: KE→0 (default restitution=0), connection counter 1, edge mask aktivní (sdílená hrana červená). Test sezení 10 — Stage 3a auto-jointing.',
+    setup: (api) => {
+      api.setIntegration('hybrid-α');
+      api.setG(0);
+      api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
+      api.spawn(-2, 0, 0.5, 0, 0, 0, 1, false);
+      api.spawn(+2, 0, -0.5, 0, 0, 0, 1, false);
+    },
+    stopAtTime: 8,
+  },
+  {
+    id: 'e11',
+    name: 'E11 — Auto-joint trio (gravity)',
+    description:
+      '3 pixely v řadě v (-2, 0), (0, 0), (+2, 0), vy=0, G=1. Gravitace přitáhne sousedy → postupné slepování. Očekávané: 2 jointy (řetězec), edge mask: levý #0 +X, střední #1 -X +X (3), pravý #2 -X. Test multi-joint accumulation. Stop @ 12 s.',
+    setup: (api) => {
+      api.setIntegration('hybrid-α');
+      api.setG(1);
+      api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
+      api.spawn(-2, 0, 0, 0, 0, 0, 1, false);
+      api.spawn(0, 0, 0, 0, 0, 0, 1, false);
+      api.spawn(+2, 0, 0, 0, 0, 0, 1, false);
+    },
+    stopAtTime: 12,
+  },
+  {
     id: 'e5',
     name: 'E5 — Hybrid gravity + Rapier',
     description:

@@ -2,9 +2,9 @@
   import { onMount } from 'svelte';
   import { World, saveZeroVel, restoreVelDelta } from '../sim/physics';
   import { stepGravity, stepGravityKickOnly } from '../sim/gravity';
-  import { computeDiagnostics, computeCentroid } from '../sim/diagnostics';
+  import { computeDiagnostics, computeCentroid, computeObjectCount } from '../sim/diagnostics';
   import { computeFacts, emptyFacts, type Facts, type Champion } from '../sim/facts';
-  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, SKIP_RAPIER_IF_NO_JOINTS } from '../sim/params';
+  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, SKIP_RAPIER_IF_NO_JOINTS, AUTO_JOINT_ON_CONTACT } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
   import { createFixedJoint, removeJoint } from '../sim/joints';
   import { playSpawn } from '../audio/sfx';
@@ -146,6 +146,7 @@
     cursor = null;
     centroidScreen = null;
     connectionCount = 0;
+    objectCount = 0;
   }
 
   /**
@@ -393,6 +394,19 @@
       const MAX_STEPS_PER_FRAME = 5;
       let accumulator = 0;
 
+      // Auto-jointing — po každém Rapier stepu drain contact Started events.
+      // Duplicate guard přes lineární scan v world.joints (typicky < 100 jointů).
+      // Manual mode nemá Rapier step → eventQueue prázdná → no-op.
+      const drainAndAutoJoint = (): void => {
+        if (!AUTO_JOINT_ON_CONTACT) return;
+        w.drainContactStarts((a, b) => {
+          const exists = w.joints.some(
+            (j) => (j.a === a && j.b === b) || (j.a === b && j.b === a),
+          );
+          if (!exists) createFixedJoint(w, a, b);
+        });
+      };
+
       // Space = pause. Esc = unlock kamery.
       const onKeyDown = (e: KeyboardEvent) => {
         if (e.code === 'Space' && !e.repeat) {
@@ -431,7 +445,15 @@
             const gp = { G, eps: GRAVITY_EPSILON, useGrid, cutoffFactor };
             // γ flag: pokud nejsou aktivní jointy, hybrid-* shrnout na pure manual.
             // Bypass Rapier step → konzervace ∑P/∑L na úroveň pure manual módu.
-            const skipRapier = SKIP_RAPIER_IF_NO_JOINTS && w.joints.length === 0;
+            //
+            // **Auto-joint dependency**: contact events vyžadují, aby Rapier broadphase běžela
+            // — bez `rapier.step()` se nikdy neupdatuje a Started events nelze emitovat.
+            // Když je `AUTO_JOINT_ON_CONTACT=true`, γ skip pro hybrid-* deaktivujeme i bez
+            // jointů, abychom umožnili detekci dotyku. Pro pure 'manual' mód auto-joint
+            // nemá smysl (rapier.step() se vůbec nevolá) — uživatel to musí brát jako
+            // vlastnost manuálního módu.
+            const skipRapier =
+              SKIP_RAPIER_IF_NO_JOINTS && w.joints.length === 0 && !AUTO_JOINT_ON_CONTACT;
 
             switch (integration) {
               case 'manual':
@@ -486,6 +508,8 @@
                 }
                 break;
             }
+            // Auto-joint po Rapier kroku. Pro `manual` mode no-op (queue prázdná).
+            drainAndAutoJoint();
             simTime += FIXED_DT;
             accumulator -= FIXED_DT;
             steps++;
@@ -578,6 +602,7 @@
         if (displayAccum > 0.5) {
           displayAccum = 0;
           connectionCount = w.joints.length;
+          objectCount = computeObjectCount(w);
           const d = computeDiagnostics(w);
           sumP = Math.hypot(d.px, d.py);
           sumL = d.L;

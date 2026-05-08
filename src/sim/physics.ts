@@ -1,7 +1,7 @@
 // Wrapper kolem Rapier 2D světa. Pro každý pixel = jeden RigidBody + 1×1 collider
-// (collision groups vypnuté, takže Rapier neřeší kolize — výrazně levnější).
+// s kolizemi a contact events (sezení 10) — auto-jointing při dotyku.
 //
-// Až přijde fáze 3 (lepení), přidáme FixedJoint mezi sousedy a zapneme kolize.
+// Collision groups: všichni se všemi (0xFFFFFFFF). Filtrování později (ne-lepiv kategorie?).
 
 import RAPIER from '@dimforge/rapier2d-compat';
 import type { Pixel } from '../types';
@@ -20,6 +20,17 @@ export class World {
    * iterovat přes Rapier WASM bridge per-frame.
    */
   joints: Joint[] = [];
+  /**
+   * Lookup collider handle → Pixel pro contact event handler. Rapier reportuje
+   * kolize jako handles (number); bez map by každý event vyžadoval lineární scan.
+   */
+  pixelByCollider: Map<number, Pixel> = new Map();
+  /**
+   * Sdílená EventQueue pro `step()`. Inicializuje se v `init()` (potřebuje WASM).
+   * `autoDrain=true` znamená, že queue se vyprázdní automaticky po každém drain
+   * volání a nebobtná, pokud handler nevolá drainCollisionEvents.
+   */
+  eventQueue!: RAPIER.EventQueue;
 
   /**
    * Default `canSleep` flag pro nově spawnované body. **false** je default
@@ -39,6 +50,7 @@ export class World {
     await RAPIER.init();
     // Globální gravitace světa = 0 — naše párová gravitace je external force, ne uniform.
     this.rapier = new RAPIER.World({ x: 0, y: 0 });
+    this.eventQueue = new RAPIER.EventQueue(true);
   }
 
   /**
@@ -101,14 +113,18 @@ export class World {
     const body = this.rapier.createRigidBody(desc);
 
     // Čtverec o straně 1 U → halfExtent = 0.5.
-    // collisionGroups = 0 → pixely se ignorují navzájem (kolize zapneme ve fázi 3+).
+    // collisionGroups: všichni × všichni (membership 0xFFFF, filter 0xFFFF).
+    // ActiveEvents.COLLISION_EVENTS — Rapier emituje Started/Stopped do EventQueue
+    // (čteme v main loopu pro auto-jointing).
     const colliderDesc = RAPIER.ColliderDesc.cuboid(0.5, 0.5)
-      .setCollisionGroups(0x00000000)
+      .setCollisionGroups(0xffffffff)
+      .setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS)
       .setDensity(1);
-    this.rapier.createCollider(colliderDesc, body);
+    const collider = this.rapier.createCollider(colliderDesc, body);
 
     const pixel: Pixel = { id: nextId++, body, m, pinned };
     this.pixels.push(pixel);
+    this.pixelByCollider.set(collider.handle, pixel);
     return pixel;
   }
 
@@ -121,12 +137,27 @@ export class World {
       this.rapier.removeRigidBody(p.body);
     }
     this.pixels.length = 0;
+    this.pixelByCollider.clear();
   }
 
-  /** Jeden krok simulace s daným timestepem. */
+  /** Jeden krok simulace s daným timestepem. EventQueue se naplní contact eventy. */
   step(dt: number): void {
     this.rapier.timestep = dt;
-    this.rapier.step();
+    this.rapier.step(this.eventQueue);
+  }
+
+  /**
+   * Drainuje contact Started události a callback je volán pro každý nový pár pixelů.
+   * Stopped events se ignorují — pro auto-jointing zajímá jen vznik kontaktu.
+   * Volat těsně po `step()`, jinak události zmizí v dalším drainu.
+   */
+  drainContactStarts(callback: (a: Pixel, b: Pixel) => void): void {
+    this.eventQueue.drainCollisionEvents((h1, h2, started) => {
+      if (!started) return;
+      const a = this.pixelByCollider.get(h1);
+      const b = this.pixelByCollider.get(h2);
+      if (a && b) callback(a, b);
+    });
   }
 }
 
