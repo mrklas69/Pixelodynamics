@@ -1,5 +1,55 @@
 # DONE
 
+## 2026-05-08 — Sezení 11: @AUDIT:CODE + redesign IntegrationMode + magnetic merge Stage 1
+
+- **`@AUDIT:CODE` výstup** (10 sezení dosaženo) — 1 kritický (perfSpawn vs pbSpawn duplikát), 1 K2 (Largest champion vždy null), 4 doporučené, 5 kosmetických nálezů. Vynecháno: D2 (SKIP_RAPIER_IF_NO_JOINTS legit pro experiments), D4 (perf alokace bez důvodu), C3 (App.svelte refactor — Svelte single-file convention).
+- **Audit fixes:** smazán `perfSpawn` (P-presety přes pbSpawn), `Largest` champion napojen přes `computeObjectStats(world): { count, largest: { repId, size } }` Union-Find s size tracking; `buildPixelIndex` extrahováno do diagnostics (sdíleno mezi diagnostics + edge mask v App.svelte); `createFixedJoint` má idempotent duplicate guard; PRESETS array seřazen číselně, `e8Variants()` smazána (E8r/α/β inline); H slider disabled (fáze 4+); `centroidScreen` ternary; `championLabel` smazán (Largest přes `{@render champ()}`).
+- **Redesign IntegrationMode:** `'manual' | 'rapier' | 'hybrid-naive' | 'hybrid-α' | 'hybrid-β'` → **`'without-interaction' | 'not-align' | 'align'`**. Map: manual→without-interaction, hybrid-α→not-align, NEW: align. Smazány saveZeroVel/restoreVelDelta/SavedVel (β archived). SKIP_RAPIER_IF_NO_JOINTS smazán z params.ts.
+- **Solver iters 32/8 default** (`World.init` + `applyPreset` reset). Rapier defaulty 4/1 nedostatečné pro joint chain v close-range gravity (3-pixel chain se zaboří 0.667 U). 32/8 z E3-tune ze sezení 8 + safety margin pro chains.
+- **`align` mode (current limited form)** v `createFixedJoint`:
+  - Snap r=0, rs=0 na obou pixelech.
+  - Pos snap strategie podle existing connectivity: oba bez jointů → symmetric snap k midpoint ± 0.5 (centroid invariant); jeden bez jointů → snap jen ten (chrání chain); oba s jointy → no pos snap.
+  - Edge anchor ±0.5 podle dominantní osy.
+  - lockRotations(true).
+  - **Žádný per-tick brute force** — to ničí Rapier joint warm-start cache (lekce z evolučních pokusů 1-3).
+  - $effect na integration change → jednorázový lock/unlock pass. LMB spawn během align → lock na novém pixelu.
+  - **Známé omezení:** align na rotujících chains porušuje joint anchory (anchor v lokálním frame, po setRotation(0) world pozice anchor změněna → solver overshoot → overlap). Pro rotující bodies use not-align. Dokumentováno v info tooltip.
+- **Smazány všechny E*/P*/PB* presety + helpery** (e5Spawn/e6Spawn/e7Spawn/e8Spawn). Nahrazeno:
+  - **G1024** — 32×32 axis-aligned grid, spacing 3 U, default `without-interaction`, no stop. Pure gravity collapse showcase.
+  - **E1** — 2 pixely v ±2, klid, G=1, not-align, stop@10s. Pair attract, fixní obdélník v origin, ∑P=∑L=0.
+  - **E2** — jako E1 s rs=±1. Test ∑L cancel. Pair distance > 1 U (rotated kontakt) — věrná fyzika.
+  - **E3** — 4-pixelová tyčka rotující ω=+1 + 1 pixel ω=-1, not-align, stop@10s. Test ∑L=5.5 preservation přes auto-joint kontakt.
+  - **E1align, E2align** — align varianty pro deterministický 1 U pair. Bit-identický výsledek.
+- **UI cleanup:**
+  - Patička: AppName 12 px, `#cfd6e0`, font-weight 600 (z 10 px, dim).
+  - COMMANDS přesunut z right do left panelu pod FACTS. Home camera, Pause/Resume, Export JSON, Clear v COMMANDS.
+  - "Reset scény" → "Clear" (z right SETTINGS panelu).
+  - HUD `cur` → `cursor` (`.lbl` min-width 22→40 px).
+  - Smazána tlačítka 🔗 Spojit poslední 2 / ✂ Rozpojit vše + funkce `connectLastTwo`/`disconnectAll`/`removeJoint` import (auto-joint default).
+  - Bohatší multi-line title tooltipy + (?) ikony u G/H/cutoff/mód v SETTINGS panelu.
+  - `jointCol` z `#d86f6f` (red) na `#6f8ec1` (h2 modrá panelových titulků) v `gl.ts` shaderu.
+- **Spawn LMB** = r=0, rs=0 (jen linvel perturbace ±0.1 U/s). `SPAWN_ANGVEL_MAX` smazán.
+- **Magnetic merge Stage 1** (`src/sim/composite.ts`, ~230 LOC):
+  - `Composite` type: id, members, com, linvel, angvel, mass, inertia (s parallel axis theorem).
+  - `buildComposites(world)` přes Union-Find s computeAggregate.
+  - `freeEdges(composite, world)` enumeruje 4 strany každého pixelu, vyřazuje shared přes joint (anchor v dané dominant ose).
+  - `segmentDistance` line-segment-to-line-segment v 2D (Christer Ericson §5.1.9).
+  - `detectMergeCandidates(world, composites, threshold)` per-pair edge proximity, vrací nejbližší kandidáty pod threshold.
+  - `MAGNET_THRESHOLD = 0.1` v params.ts (parameter programu).
+  - App.svelte: `mergeCandidateCount` $state, per-display-tick build + detect, "Merge cand." řádek v STATS panelu.
+  - **Stage 1 = pure detection, no merge.** Verifier: counter ukazuje rozumné hodnoty napříč scénáři (uživatel ověřil).
+- **Test results:**
+  - E1 not-align (G=20): pair distance 0.98 U, ∑P na f32 ulp, ∑L 4e-14, KE=9e-28. ✓
+  - E2 not-align (G=20): pair distance 1.314 U (rotated kontakt — věrná fyzika), pair r ≈ ±2.45 rad, rs ≈ 0.0016, ∑L=0.0019. ✓ konzervace
+  - E1align/E2align (G=1): bit-identické, distance přesně 1 U, ∑P=∑L=KE=0. ✓
+  - E3 not-align (G=1): 5-pixel slepenec po t≈3 s contact, ∑L=5.495 (drift 0.09% za 10 s), ∑P f32 ulp. ✓ konzervace exquisitně
+- **Lessons learned (z censure):**
+  - Per-tick `lockRotations + setRotation(0) + setAngvel(0)` na všech pixelech **resetuje Rapier joint warm-start cache** (Lagrange multipliers cumulating across ticks). Solver iters startují z čistého stavu → konvergence per tick limited → drift pod constraint distance. **Solver warm-start je doctrine v PGS solverech.**
+  - **Align scope creep**: 4-iterace fix→rollback→re-add za jediné sezení. Po 1. pokusu měl jsem doporučit fundamental redesign (rigid body merge), ne iterace na patches.
+  - **G1024 bez tuneRapier** (Pixelodynamics-wide defaulty by měly být v init(), ne v presetu). Po smazání all E* presetů preset-driven tuning chyběl, fresh LMB workflow dostal Rapier defaulty 4/1 → pair stuck.
+  - **E2align centroid drift** — first fresh-pair pos snap volil "snap newer", asymmetrický kontakt → centroid drift. Mental simulation collision symmetry by to odhalila.
+  - **E3 align bug** (rotující chains) — snap rotace na pixelech v rotujícím chainu invaliduje joint anchory v lokálním frame. Anchor v lokálním frame změní world pozici, joint constraint violated → solver violence → overlap. Fundamentální omezení současné align implementace.
+
 ## 2026-05-08 — Sezení 10: Stage 3a — auto-jointing při kontaktu, object counter
 
 - **`AUTO_JOINT_ON_CONTACT=true`** (`src/sim/params.ts`) — toggle pro auto-detekci dotyku po straně. Při Rapier collision Started event mezi dvěma pixely se automaticky vytvoří FixedJoint (s duplicate guard).

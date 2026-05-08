@@ -42,9 +42,8 @@ void main() {
 // Fragment vyplní jen pruh u kraje (vnitřek discard). Lockovaný pixel dostane
 // amber barvu shodující se s ikonou 🔒 v HUD (#d8b76f). Default = chladná modrobílá.
 //
-// Edge mask: hrany sousedící s jointem se vykreslí červeně (#d86f6f) místo
-// default base. Vizuální signál spoje se zachová i pro long-distance jointy
-// (kde transparency by se ztrácela), bez black gapů v rozích.
+// Edge mask: hrany sousedící s jointem se vykreslí stejnou modrou jako titulky panelů
+// (#6f8ec1) — vizuální koherence „strukturní spojení = panel header" místo varovné červené.
 const FRAG_SRC = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -74,7 +73,7 @@ void main() {
 
   vec3 base = vec3(0.85, 0.92, 1.0);
   vec3 lockCol = vec3(0.847, 0.718, 0.435);    // #d8b76f
-  vec3 jointCol = vec3(0.847, 0.435, 0.435);   // #d86f6f
+  vec3 jointCol = vec3(0.435, 0.557, 0.757);   // #6f8ec1
   vec3 col = mix(base, lockCol, v_locked);
   if (jointEdge) col = jointCol;
   outColor = vec4(col, 1.0);

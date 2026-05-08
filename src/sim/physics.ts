@@ -5,7 +5,7 @@
 
 import RAPIER from '@dimforge/rapier2d-compat';
 import type { Pixel } from '../types';
-import { SPAWN_LINVEL_MAX, SPAWN_ANGVEL_MAX } from './params';
+import { SPAWN_LINVEL_MAX } from './params';
 import type { Joint } from './joints';
 import { removeAllJointsSilent } from './joints';
 
@@ -45,12 +45,19 @@ export class World {
   /**
    * Inicializace musí být await — Rapier WASM se načítá asynchronně.
    * `compat` build inlinuje WASM jako base64, takže nepotřebujeme žádný extra deploy step.
+   *
+   * Solver iters: default 32/8. Pro joint chain s gravitační kompresí jsou Rapier
+   * defaulty 4/1 nedostatečné (chain se zaboří 0.667 U pod constraint distance).
+   * 16/4 (E3-tune ze sezení 8) zlepší orbital pair na drift ~0.01%, ale pro 3+ pixel
+   * chain v close-range gravity jsou sporadicky nedostatečné. 32/8 je bezpečný kompromis.
    */
   async init(): Promise<void> {
     await RAPIER.init();
     // Globální gravitace světa = 0 — naše párová gravitace je external force, ne uniform.
     this.rapier = new RAPIER.World({ x: 0, y: 0 });
     this.eventQueue = new RAPIER.EventQueue(true);
+    this.setSolverIterations(32);
+    this.setPgsIterations(8);
   }
 
   /**
@@ -71,8 +78,10 @@ export class World {
   }
 
   /**
-   * Vytvoří nový pixel na zadané pozici s náhodnými počátečními rychlostmi a rotací.
-   * Rozsahy random hodnot jsou v `params.ts` jako konstanty programu.
+   * Vytvoří nový pixel na zadané pozici s drobnou random linvel perturbací (pro
+   * netriviální testovací scénáře), ale **r=0 a rs=0** — rotace by jinak v `align`
+   * módu byla okamžitě nuceně snapnutá a v `not-align` módu by random orientace
+   * znamenala off-edge anchor při auto-jointu (nešťastný UX).
    * Pro deterministické scénáře (presety, experimenty) použij `spawnPixelExact`.
    */
   spawnPixel(x: number, y: number): Pixel {
@@ -81,8 +90,8 @@ export class World {
       y,
       (Math.random() - 0.5) * 2 * SPAWN_LINVEL_MAX,
       (Math.random() - 0.5) * 2 * SPAWN_LINVEL_MAX,
-      Math.random() * Math.PI * 2,
-      (Math.random() - 0.5) * 2 * SPAWN_ANGVEL_MAX,
+      0,
+      0,
       1,
       false,
     );
@@ -161,58 +170,3 @@ export class World {
   }
 }
 
-/**
- * Snapshot rychlostí pixelů — used pro `hybrid-β` (save-zero-restore).
- * Pinned pixely se ukládají také (lin/ang vel = 0), ale `restoreVelDelta` je přeskočí.
- */
-export type SavedVel = {
-  vx: Float64Array;
-  vy: Float64Array;
-  rs: Float64Array;
-};
-
-/**
- * Pro β: ulož aktuální linvel/angvel non-pinned pixelů, set 0/0 v Rapier body. Po `world.step()`
- * voláme `restoreVelDelta(world, saved)`, která čte novou linvel/angvel (= delta z constraint
- * impulses, protože před stepem byla 0) a přičte k saved hodnotám.
- *
- * Důvod: Rapier `step()` integruje `pos += vel·dt` interně. Pokud chceme, aby drift udělal
- * **náš** symplektický Euler (sezení 3: rapier gravity-side broken), musíme Rapieru
- * "ukrást" pos drift tím, že mu dáme vel=0. Constraint solver pak řeší **jen impulses**
- * (joint pole, contact reactions), které vrátí body do platného stavu — to chceme.
- */
-export function saveZeroVel(world: World): SavedVel {
-  const n = world.pixels.length;
-  const vx = new Float64Array(n);
-  const vy = new Float64Array(n);
-  const rs = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const p = world.pixels[i]!;
-    if (p.pinned) continue;
-    const v = p.body.linvel();
-    vx[i] = v.x;
-    vy[i] = v.y;
-    rs[i] = p.body.angvel();
-    p.body.setLinvel({ x: 0, y: 0 }, true);
-    p.body.setAngvel(0, true);
-  }
-  return { vx, vy, rs };
-}
-
-/**
- * Po `world.step()` přečti novou linvel/angvel (= delta z constraint impulses) a přičti ke
- * snapshot. Výsledek vrací k normálnímu nenulovému stavu pro další gravity kick.
- *
- * Edge case: pokud `world.step()` "spí" pinned pixel a auto-clearuje vel, naše saved hodnoty
- * pro pinned jsou 0 (skip v save), takže addback je no-op. OK.
- */
-export function restoreVelDelta(world: World, saved: SavedVel): void {
-  const n = world.pixels.length;
-  for (let i = 0; i < n; i++) {
-    const p = world.pixels[i]!;
-    if (p.pinned) continue;
-    const v = p.body.linvel();
-    p.body.setLinvel({ x: saved.vx[i]! + v.x, y: saved.vy[i]! + v.y }, true);
-    p.body.setAngvel(saved.rs[i]! + p.body.angvel(), true);
-  }
-}

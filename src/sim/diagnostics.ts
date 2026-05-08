@@ -81,19 +81,35 @@ export function computeDiagnostics(world: World): Diagnostics {
   return { px, py, ke, L, cx, cy, mass };
 }
 
+/** Stats spočítaný z grafu pixely-jointy v jediném Union-Find průchodu. */
+export type ObjectStats = {
+  /** Počet komponent souvislosti (= počet objektů). */
+  count: number;
+  /** Reprezentant největší komponenty + počet pixelů. null pro prázdnou scénu. */
+  largest: { repId: number; size: number } | null;
+};
+
+/** Lookup `pixel → index` — sdílený mezi diagnostics a render edge mask (App.svelte). */
+export function buildPixelIndex(world: World): Map<Pixel, number> {
+  const idxOf = new Map<Pixel, number>();
+  for (let i = 0; i < world.pixels.length; i++) idxOf.set(world.pixels[i]!, i);
+  return idxOf;
+}
+
 /**
- * Počet objektů ve scéně = počet komponent souvislosti grafu (pixely jako vrcholy,
- * jointy jako hrany). Disjoint-set s path compression a union by size — O((N+J)·α).
+ * Statistika objektů (pixely jako vrcholy, jointy jako hrany) v jednom Union-Find
+ * průchodu s path compression a union by size — O((N+J)·α).
+ *
+ * Vrací: počet komponent + reprezentanta největší (pro `Largest` champion).
  *
  * Volá se á 500 ms v display ticku, takže perf je bez přetížení i pro N=1000, J=500.
  * Pro statickou topologii (žádné nové jointy) bychom mohli kachovat, ale auto-jointing
  * v hybrid-α znamená, že topologie se mění organicky → vždy přepočítat.
  */
-export function computeObjectCount(world: World): number {
+export function computeObjectStats(world: World): ObjectStats {
   const n = world.pixels.length;
-  if (n === 0) return 0;
-  const idxOf = new Map<Pixel, number>();
-  for (let i = 0; i < n; i++) idxOf.set(world.pixels[i]!, i);
+  if (n === 0) return { count: 0, largest: null };
+  const idxOf = buildPixelIndex(world);
 
   const parent = new Int32Array(n);
   const size = new Int32Array(n);
@@ -132,5 +148,19 @@ export function computeObjectCount(world: World): number {
     }
     components--;
   }
-  return components;
+
+  // Najdi root s největší size. Procházíme jen roots (parent[i] === i).
+  let bestRoot = 0;
+  let bestSize = size[0]!;
+  for (let i = 1; i < n; i++) {
+    if (parent[i] !== i) continue;
+    if (size[i]! > bestSize) {
+      bestRoot = i;
+      bestSize = size[i]!;
+    }
+  }
+  return {
+    count: components,
+    largest: { repId: world.pixels[bestRoot]!.id, size: bestSize },
+  };
 }

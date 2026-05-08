@@ -25,8 +25,16 @@ export const emptyFacts: Facts = {
 
 /**
  * @param cmx, cmy — souřadnice těžiště (z diagnostiky), kvůli orbitálnímu členu úhlové hybnosti.
+ * @param largest — výsledek `computeObjectStats(world).largest`. Jednotvárně isolated pixel
+ *   = komponenta velikosti 1, takže `Largest` ukazuje vždy aspoň `1` při neprázdné scéně.
+ *   `null` pouze pro N=0.
  */
-export function computeFacts(world: World, cmx: number, cmy: number): Facts {
+export function computeFacts(
+  world: World,
+  cmx: number,
+  cmy: number,
+  largest: { repId: number; size: number } | null,
+): Facts {
   if (world.pixels.length === 0) return emptyFacts;
 
   let fastest: Champion = null;
@@ -60,7 +68,7 @@ export function computeFacts(world: World, cmx: number, cmy: number): Facts {
     mostSpin,
     mostMomentum,
     mostAngularMomentum,
-    largest: null, // composite objects přijdou ve fázi 3
+    largest: largest ? { id: largest.repId, value: largest.size } : null,
     mostMassive,
   };
 }

@@ -11,28 +11,31 @@ import type { World } from './physics';
 import type { Pixel } from '../types';
 
 /**
- * Integrační mód určuje, jakým způsobem se aktualizují pos/vel pixelů:
- *   - `manual`        jen náš symplektický Euler (gravitace pozadí); Rapier step() se nevolá.
- *                     Stav fáze 2 — bez constraintů/kontaktů.
- *   - `rapier`        jen `world.step(dt)` — Rapier interní integrátor + constraints/contacts.
- *                     Pro experimenty E1–E4 (G=0): měříme co Rapier dělá sám o sobě.
- *   - `hybrid-naive`  full manual stepGravity + full Rapier step. Dvojitá integrace pos
- *                     drift. Empiricky broken (sezení 3, E5 vs E5m: ∑P/∑L drift 10⁴×
- *                     horší kvůli f32 bridge). Zachováno pro reprodukci E5.
- *   - `hybrid-α`      Velocity-Verlet split: manual jen `v += a·dt` (kick), Rapier dělá
- *                     `pos += v·dt` (drift) + constraint resolution. Standardní pattern.
- *                     Joint solver má autoritu nad pos.
- *   - `hybrid-β`      Save-zero-restore vel: manual full kick+drift, pak před Rapier step()
- *                     uložíme/vynulujeme linvel+angvel, Rapier integruje pos s vel=0
- *                     (žádný posun) ale solver vrátí impulse z constraintů → po stepu
- *                     přečteme delta a přičteme k uložené vel. Drift má autoritu manual.
+ * Integrační mód = vztah mezi gravitační simulací a Rapier joint solverem.
+ *
+ *   - `without-interaction`  Jen párová gravita (manual symplektický Euler).
+ *                            Rapier step() se nevolá → žádné kontakty, žádné jointy.
+ *                            Pixely procházejí jeden druhým. Pro pure orbital dynamics
+ *                            se zachovanými ∑P/∑L na úroveň f64 ulp.
+ *   - `not-align`            Velocity-Verlet split: manual jen kick (v += a·dt), Rapier
+ *                            dělá pos drift + joint solver + auto-jointing při kontaktu.
+ *                            Slepence zachovají rotace pixelů a věrně pruží/kmitají;
+ *                            anchor = midpoint mezi centry (může být off-edge pro
+ *                            natočené pixely, ale physics dynamics konzistentní).
+ *   - `align`                Jako `not-align`, ale při auto-jointu **destruktivně**
+ *                            snapne pos newer pixelu (vyšší id) na axis-aligned 1 U
+ *                            distance + snap r=0, rs=0, lockRotations(true). Vznikne
+ *                            vždy axis-aligned mřížka. Jednorázová intervence při
+ *                            create (žádný per-tick reset, který by ničil joint
+ *                            warm-start). Cena: ztráta rotace; pair distance vždy
+ *                            přesně 1 U, ale collision dynamics zničena.
  */
-export type IntegrationMode = 'manual' | 'rapier' | 'hybrid-naive' | 'hybrid-α' | 'hybrid-β';
+export type IntegrationMode = 'without-interaction' | 'not-align' | 'align';
 
 export type PresetAPI = {
   /** Vrátí gravitační konstantu G (parametr SETTINGS). */
   setG: (g: number) => void;
-  /** Vrátí konstantu vazby H (zatím nepoužitá, fáze 3+). */
+  /** Vrátí konstantu vazby H (zatím nepoužitá, fáze 4+). */
   setH: (h: number) => void;
   /** Přepne integrační mód (viz `IntegrationMode`). */
   setIntegration: (mode: IntegrationMode) => void;
@@ -58,15 +61,11 @@ export type PresetAPI = {
   ) => Pixel;
   /**
    * Vytvoří FixedJoint mezi dvěma pixely (anchor = midpoint mezi centry).
-   * Používá se v presetech, které mají testovat constraint physiku (E3+).
    */
   connect: (a: Pixel, b: Pixel) => void;
   /**
-   * Tuning Rapier solveru pro experimenty (E3t/E3s). Hodnoty platí jen v rámci
-   * presetu — `applyPreset` přes `resetScene` nezruší integration parameters,
-   * takže pokud preset nezavolá `tuneRapier`, předchozí nastavení by přetrvalo.
-   * Pro robustnost: každý preset, který se Rapieru dotýká, by měl explicitně
-   * tuneRapier zavolat (aspoň defaulty).
+   * Tuning Rapier solveru. Default: `solverIterations=4`, `pgsIterations=1`, `canSleep=false`.
+   * `applyPreset` před setup vrací tunings na default; preset si pak může nastavit vlastní.
    */
   tuneRapier: (opts: { solverIterations?: number; pgsIterations?: number; canSleep?: boolean }) => void;
 };
@@ -80,377 +79,138 @@ export type Preset = {
   stopAtTime?: number;
 };
 
+/**
+ * G1024 — 32×32 grid axis-aligned pixelů, spacing 3 U.
+ * Pure gravity collapse pro pozorování krásných průběhů ve `without-interaction` módu;
+ * po přepnutí na `not-align` se cluster organicky lepí.
+ */
+function g1024Spawn(api: PresetAPI): void {
+  const COLS = 32;
+  const ROWS = 32;
+  const SPACING = 3;
+  const xOff = ((COLS - 1) * SPACING) / 2;
+  const yOff = ((ROWS - 1) * SPACING) / 2;
+  for (let row = 0; row < ROWS; row++) {
+    for (let col = 0; col < COLS; col++) {
+      api.spawn(col * SPACING - xOff, row * SPACING - yOff, 0, 0, 0, 0, 1, false);
+    }
+  }
+}
+
 export const PRESETS: Preset[] = [
   {
     id: 'e1',
-    name: 'E1 — Rapier baseline',
+    name: 'E1 — Pair attract (no rotation)',
     description:
-      '2 pixely, gravity=0, no joints/contacts, manual linvel=0. Měříme: mění Rapier sám pos/vel? (default damping, CCD, …)',
+      '2 pixely v (-2, 0) a (+2, 0), klid (vx=vy=rs=0), G=1, mode `not-align`. ' +
+      'Stop @ 10 s. Očekávání: gravita přitáhne, kontakt → auto-joint, finální fixní ' +
+      'obdélník v origin, pair distance ≈ 1 U (oba r=0 při kontaktu). ∑P=0, ∑L=0.',
     setup: (api) => {
-      api.setIntegration('rapier');
-      api.setG(0);
-      api.spawn(-5, 0, 0, 0, 0, 0);
-      api.spawn(+5, 0, 0, 0, 0, 0);
+      api.setIntegration('not-align');
+      api.setG(1);
+      api.setUseGrid(false);
+      api.spawn(-2, 0, 0, 0, 0, 0, 1, false);
+      api.spawn(+2, 0, 0, 0, 0, 0, 1, false);
     },
     stopAtTime: 10,
   },
   {
     id: 'e2',
-    name: 'E2 — Rapier velocity damping',
+    name: 'E2 — Pair attract (opposite spin)',
     description:
-      '2 pixely, gravity=0, no joints/contacts, manual linvel=(1, 0). Měříme: tlumí Rapier rychlost? (linearDamping)',
+      'Jako E1 ale rs=+1 vlevo, rs=-1 vpravo. ∑L_init=0 (cancel). Po slepení joint sync ' +
+      'rotaci páru → pair angvel = 0 (conservation). Pair distance > 1 U typically — pixely ' +
+      'jsou rotated v okamžik kontaktu, anchor padne na midpoint v rotated geometrii. ' +
+      'VĚRNÁ FYZIKA, ne bug: collision moment je determined by initial rotation. ' +
+      'Pro identický 1 U pair viz E2align.',
     setup: (api) => {
-      api.setIntegration('rapier');
-      api.setG(0);
-      api.spawn(-5, 0, 1, 0, 0, 0);
-      api.spawn(+5, 0, 0, 0, 0, 0.5); // i s nenulovou angvel — kontrola angularDamping
+      api.setIntegration('not-align');
+      api.setG(1);
+      api.setUseGrid(false);
+      api.spawn(-2, 0, 0, 0, 0, +1, 1, false);
+      api.spawn(+2, 0, 0, 0, 0, -1, 1, false);
+    },
+    stopAtTime: 10,
+  },
+  {
+    id: 'e1align',
+    name: 'E1 align — Pair attract (no rotation, snap)',
+    description:
+      'Jako E1 ale mode `align`. Při auto-jointu pos snap newer pixelu na 1 U distance ' +
+      '+ edge-to-edge anchor + lockRotations. Pair distance přesně 1 U deterministicky. ' +
+      'Pro E1 (no rotation) by mělo být identické s not-align variantou.',
+    setup: (api) => {
+      api.setIntegration('align');
+      api.setG(1);
+      api.setUseGrid(false);
+      api.spawn(-2, 0, 0, 0, 0, 0, 1, false);
+      api.spawn(+2, 0, 0, 0, 0, 0, 1, false);
+    },
+    stopAtTime: 10,
+  },
+  {
+    id: 'e2align',
+    name: 'E2 align — Pair attract (opposite spin, snap)',
+    description:
+      'Jako E2 ale mode `align`. Pixely rotují (rs=±1) během letu, ale při auto-joint align ' +
+      'destruktivně snapne pos + r=0 → fixní obdélník 1 U distance, pair r=0. Rozdíl proti ' +
+      'E2 not-align (pair distance ~1.3 U, pair r ≈ 2.5 rad) ukazuje cenu align: ztráta ' +
+      'rotation memory + collision physics, výměnou za axis-aligned grid.',
+    setup: (api) => {
+      api.setIntegration('align');
+      api.setG(1);
+      api.setUseGrid(false);
+      api.spawn(-2, 0, 0, 0, 0, +1, 1, false);
+      api.spawn(+2, 0, 0, 0, 0, -1, 1, false);
     },
     stopAtTime: 10,
   },
   {
     id: 'e3',
-    name: 'E3 — FixedJoint orbit',
+    name: 'E3 — Rotating bar + spinning pixel',
     description:
-      '2 pixely (m=1) v (0,0) a (1,0), FixedJoint, vy=0.5 na pravém. canSleep=false (Pixelodynamics default), solver iters=16/PGS=4 (tuned). Analytical: ω=0.3 rad/s, cm posun (0, 2.5) za 10s, pair angle 3 rad. Drift po 10s typicky <0.05% na ω, ∑P konzervován k f32 epsilon. Sezení 8 baseline po vyladění sleep+solver.',
+      '4pixelová tyčka v (-3..0, 0) jako rigid body s ω=+1 rad/s (per-pixel vy = ω·Δx_rel ' +
+      'kolem CoM v -1.5). Vpravo 1 pixel v (5, 0) v klidu, ω=-1 rad/s. Mode `not-align`, ' +
+      'G=1, stop @ 10 s.\n' +
+      'Initial: ∑P=0 (sym), ∑L=5.5 (orbital 5 + spin 0.5). ' +
+      'Očekávání: gravita přitáhne pravý pixel k tyčce, kontakt → auto-joint, ∑P a ∑L ' +
+      'zachovány do f32 šumu (joint preserve relative orientation).',
     setup: (api) => {
-      api.setIntegration('rapier');
-      api.setG(0);
-      api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
-      const a = api.spawn(0, 0, 0, 0, 0, 0);
-      const b = api.spawn(1, 0, 0, 0.5, 0, 0);
-      api.connect(a, b);
+      api.setIntegration('not-align');
+      api.setG(1);
+      api.setUseGrid(false);
+      const omega = 1;
+      // Tyčka: 4 pixely v (-3, 0)..(0, 0), CoM v (-1.5, 0).
+      // Rigid rotation: linvel pixelu = ω × r_rel = (0, ω·Δx, 0). vx=0 (Δy=0).
+      const cmx = -1.5;
+      const p0 = api.spawn(-3, 0, 0, omega * (-3 - cmx), 0, omega, 1, false);
+      const p1 = api.spawn(-2, 0, 0, omega * (-2 - cmx), 0, omega, 1, false);
+      const p2 = api.spawn(-1, 0, 0, omega * (-1 - cmx), 0, omega, 1, false);
+      const p3 = api.spawn(0, 0, 0, omega * (0 - cmx), 0, omega, 1, false);
+      api.connect(p0, p1);
+      api.connect(p1, p2);
+      api.connect(p2, p3);
+      // Pravý pixel — opposite spin.
+      api.spawn(5, 0, 0, 0, 0, -omega, 1, false);
     },
     stopAtTime: 10,
   },
-  ...e8Variants(),
   {
-    id: 'e10',
-    name: 'E10 — Auto-joint head-on',
+    id: 'g1024',
+    name: 'Grid 1024 — 32×32 čtverec',
     description:
-      '2 pixely v (-2, 0) a (+2, 0), vx=±0.5 (head-on), G=0. Při dotyku se mají automaticky slepit (collision Started → createFixedJoint). Po kontaktu: KE→0 (default restitution=0), connection counter 1, edge mask aktivní (sdílená hrana červená). Test sezení 10 — Stage 3a auto-jointing.',
+      '1024 pixelů v 32×32 axis-aligned gridu, spacing 3 U (range ~93 U). Stůl v klidu. ' +
+      'Ve `without-interaction` čistý gravitační kolaps; v `not-align` se cluster ' +
+      'organicky lepí. Cutoff factor naladí slider v SETTINGS — pozor, hard cutoff je culling, ' +
+      'ne approximation.',
     setup: (api) => {
-      api.setIntegration('hybrid-α');
-      api.setG(0);
-      api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
-      api.spawn(-2, 0, 0.5, 0, 0, 0, 1, false);
-      api.spawn(+2, 0, -0.5, 0, 0, 0, 1, false);
-    },
-    stopAtTime: 8,
-  },
-  {
-    id: 'e11',
-    name: 'E11 — Auto-joint trio (gravity)',
-    description:
-      '3 pixely v řadě v (-2, 0), (0, 0), (+2, 0), vy=0, G=1. Gravitace přitáhne sousedy → postupné slepování. Očekávané: 2 jointy (řetězec), edge mask: levý #0 +X, střední #1 -X +X (3), pravý #2 -X. Test multi-joint accumulation. Stop @ 12 s.',
-    setup: (api) => {
-      api.setIntegration('hybrid-α');
-      api.setG(1);
-      api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
-      api.spawn(-2, 0, 0, 0, 0, 0, 1, false);
-      api.spawn(0, 0, 0, 0, 0, 0, 1, false);
-      api.spawn(+2, 0, 0, 0, 0, 0, 1, false);
-    },
-    stopAtTime: 12,
-  },
-  {
-    id: 'e5',
-    name: 'E5 — Hybrid gravity + Rapier',
-    description:
-      '12 pixelů ve volné konfiguraci, manuální gravitace + Rapier step (no joints). Měříme: drift ∑P/∑L oproti čistě manuálnímu loopu (sezení 2).',
-    setup: (api) => {
-      api.setIntegration('hybrid-naive');
-      api.setG(1.0);
-      e5Spawn(api);
-    },
-    stopAtTime: 60,
-  },
-  {
-    id: 'e5m',
-    name: 'E5m — Manual (baseline pro E5)',
-    description:
-      'Stejná konfigurace jako E5 a stejný simTime, ale jen manuální Euler (žádný Rapier step). Slouží jako baseline pro odhalení double-integration v hybridu.',
-    setup: (api) => {
-      api.setIntegration('manual');
-      api.setG(1.0);
-      // Naive O(N²) — historický baseline ze sezení 3, kdy spatial grid neexistoval.
-      // Bez explicitního setUseGrid by E5m visel na default GRAVITY_USE_GRID (po sezení 4 = true)
-      // a tichá změna by zfalšovala srovnání s hybridem.
-      api.setUseGrid(false);
-      e5Spawn(api);
-    },
-    stopAtTime: 60,
-  },
-  {
-    id: 'e7n',
-    name: 'E7n — Grid validace: naive baseline',
-    description:
-      '12 pixelů ve 4×3 gridu (spacing 6 U, range 18×12 U), manual Euler, naive O(N²) gravita. Většina párů (49 ze 66) je za cutoff 7.5 U — referenční pole pro porovnání s gridem v E7g. Stejný spawn = bit-by-bit diff modelshotů.',
-    setup: (api) => {
-      api.setIntegration('manual');
-      api.setG(1.0);
-      api.setUseGrid(false);
-      e7Spawn(api);
-    },
-    stopAtTime: 60,
-  },
-  {
-    id: 'e7g',
-    name: 'E7g — Grid validace: spatial grid',
-    description:
-      'Stejný setup jako E7n, ale s GRAVITY_USE_GRID=true. Hard cutoff 7.5 U vyřízne 49 ze 66 párů. Měříme: (a) ∑P/∑L drift na f64 floor jako E7n? (b) KE drift sekulární vs. oscilační? (c) divergence trajektorií od chaosu po f64 ulp na hraně cutoffu.',
-    setup: (api) => {
-      api.setIntegration('manual');
+      api.setIntegration('without-interaction');
       api.setG(1.0);
       api.setUseGrid(true);
-      e7Spawn(api);
+      g1024Spawn(api);
     },
-    stopAtTime: 60,
-  },
-  {
-    id: 'e6',
-    name: 'E6 — Lagrange L1',
-    description:
-      '30 pixelů (m=1) PINNED v (-10, 0) → cluster m=30, 1 pixel PINNED v (+10, 0), volný test pixel na L1 (Plummer-corrected, ≈+7.43). Cluster + singlet jsou pinned, jinak by se stáhli a problém zanikl. Naive gravita (grid cutoff 7.5 U). L1 je SADDLE (τ ≈ 4 s) — z f32 ulp drift po 30 s ~0.5 mU = pod 1 px, po 60 s už nelineární kollaps.',
-    setup: (api) => {
-      api.setIntegration('manual');
-      api.setG(1.0);
-      api.setUseGrid(false); // grid hard cutoff (5·ε = 7.5 U) by odřízl 12.6 U cluster-test gravitu
-      e6Spawn(api);
-    },
-    stopAtTime: 30,
-  },
-  {
-    id: 'pb500',
-    name: 'PB500 — perf benchmark (N=500)',
-    description:
-      '500 pixelů v √N čtvercovém gridu, spacing 3 U (range ~66 U). G=1, manual + grid. Stůl v klidu. Cutoff factor naladí slider v SETTINGS (3–12·ε). Auto-stop @ 5 s, modelshot pro ∑E ověření; FPS sleduj v STATS panelu.',
-    setup: (api) => {
-      api.setIntegration('manual');
-      api.setG(1.0);
-      api.setUseGrid(true);
-      pbSpawn(api, 500, 3);
-    },
-    stopAtTime: 30,
-  },
-  {
-    id: 'pb1000',
-    name: 'PB1000 — perf benchmark (N=1000)',
-    description:
-      '1000 pixelů v √N čtvercovém gridu, spacing 3 U (range ~93 U). G=1, manual + grid. Cutoff factor naladí slider. Auto-stop @ 5 s. Stejný protokol jako PB500.',
-    setup: (api) => {
-      api.setIntegration('manual');
-      api.setG(1.0);
-      api.setUseGrid(true);
-      pbSpawn(api, 1000, 3);
-    },
-    stopAtTime: 30,
   },
 ];
-
-/**
- * Benchmark spawn — N pixelů v deterministickém grid layoutu (cols × rows ≥ N),
- * centred kolem (0,0). Spacing volený tak, aby ~část párů padla pod cutoff
- * a ~část nad → grid má co kullovat. Pixely v klidu (vx=vy=0, rs=0).
- */
-function pbSpawn(api: PresetAPI, n: number, spacing: number): void {
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  const xOff = ((cols - 1) * spacing) / 2;
-  const yOff = ((rows - 1) * spacing) / 2;
-  for (let i = 0; i < n; i++) {
-    const col = i % cols;
-    const row = Math.floor(i / cols);
-    api.spawn(col * spacing - xOff, row * spacing - yOff, 0, 0, 0, 0, 1, false);
-  }
-}
-
-/**
- * E6 spawn: cluster + singlet + test pixel přesně na L1 pro Plummer kernel.
- *
- * L1 podmínka (mezi M1 a M2 v ose, vzdálenost D, softening ε):
- *   M1 / (r² + ε²)^{3/2}  =  M2 / ((D-r)² + ε²)^{3/2}
- * kde r je vzdálenost od M1. Pro klasický 1/r² (ε=0) by bylo r = D / (1 + √(M2/M1));
- * s Plummer ε ≠ 0 řešíme bisekcí. Konvergence: 60 iter dá ulp-přesnou polohu.
- */
-function e6Spawn(api: PresetAPI): void {
-  const D = 20;
-  const clusterX = -10;
-  const singletX = 10;
-  const eps = 1.5; // shoduje se s GRAVITY_EPSILON v params.ts
-  const M1 = 30;
-  const M2 = 1;
-
-  // Cluster: 30 PINNED pixelů na jednom bodě. m_cluster total = 30.
-  for (let i = 0; i < M1; i++) api.spawn(clusterX, 0, 0, 0, 0, 0, 1, true);
-  // Singlet: PINNED, m=1. Zaručuje statický binární potenciál.
-  api.spawn(singletX, 0, 0, 0, 0, 0, 1, true);
-
-  // Plummer force per unit mass na vzdálenosti r od bodu hmoty M je G·M·r / (r² + ε²)^{3/2}.
-  // L1 mezi M1 (vzdálenost r1) a M2 (vzdálenost r2 = D - r1):
-  //   M1·r1 / (r1²+ε²)^{3/2}  =  M2·r2 / (r2²+ε²)^{3/2}
-  //
-  // Pro Plummer kernel má rovnice **tři** kořeny v (0, D):
-  //   1) r ≈ ε² · M2 / (M1·D²)  — falešný L-bod uvnitř Plummer ε na cluster straně
-  //   2) r ≈ klasický L1         — fyzický L1 (chtěný)
-  //   3) blízko D                 — falešný L-bod na singlet straně
-  // Klasický 1/r² má jen kořen 2). Bisekci proto musíme limitovat na okolí klasické
-  // hodnoty, jinak konverguje k jednomu z falešných kořenů.
-  const rClassical = D / (1 + Math.sqrt(M2 / M1));
-  const eps2 = eps * eps;
-  // Rozsah ±2ε kolem klasické hodnoty bezpečně odděluje pravý L1 od falešných.
-  let lo = Math.max(1e-3, rClassical - 2 * eps);
-  let hi = Math.min(D - 1e-3, rClassical + 2 * eps);
-  // Predikát: f(lo) > 0 (cluster pull dominant), f(hi) < 0 (singlet pull dominant).
-  // Pokud f(mid) > 0 → mid leží v "lo" oblasti → posun lo = mid.
-  for (let i = 0; i < 80; i++) {
-    const r = (lo + hi) / 2;
-    const r2 = D - r;
-    const f1 = (M1 * r) / Math.pow(r * r + eps2, 1.5);
-    const f2 = (M2 * r2) / Math.pow(r2 * r2 + eps2, 1.5);
-    if (f1 > f2) lo = r;
-    else hi = r;
-  }
-  const r = (lo + hi) / 2;
-
-  // Sanity check: net force na test pos by měla být <= ulp roundoff.
-  const r2 = D - r;
-  const f1 = (M1 * r) / Math.pow(r * r + eps2, 1.5);
-  const f2 = (M2 * r2) / Math.pow(r2 * r2 + eps2, 1.5);
-  // Pomáhá při nesouladu params (např. změna ε): occurs in dev, neházet hard error v produkci.
-  if (Math.abs(f1 - f2) > 1e-12) {
-    console.warn(`E6 L1 bisection residual ${(f1 - f2).toExponential(3)} (>1e-12)`);
-  }
-
-  // Test pixel: free (default pinned=false).
-  api.spawn(clusterX + r, 0, 0, 0, 0, 0, 1);
-}
-
-/**
- * Sdílený spawn pro E7n/E7g — 4×3 grid, spacing 6 U, range 18×12 U.
- *
- * Distribuce párů vůči cutoff 5·ε = 7.5 U (`GRAVITY_CUTOFF_FACTOR=5`, ε=1.5):
- *   - 17 sousedních párů (dx=6 nebo dy=6, druhá osa 0) → uvnitř cutoff
- *   - 49 vzdálenějších párů (dx²+dy² ≥ 72 U²) → mimo cutoff
- *
- * E5/E5m D4 setup měl všechny páry pod cutoff → grid implementace tam dávala
- * bit-identický výsledek jako naive a nedalo se nic změřit. Tahle konfigurace
- * vynucuje, aby grid skutečně skipoval většinu párů.
- *
- * Počáteční rychlosti = 0 → systém se v gravitaci postupně rozkmitá. Chaos je
- * žádoucí: ulp roundoff na hranicích cutoff se exponenciálně amplifikuje a
- * trajektorie pixelů se rozejdou viditelně, pokud je kernel rozbitý.
- */
-function e7Spawn(api: PresetAPI): void {
-  const cols = 4;
-  const rows = 3;
-  const spacing = 6;
-  const offsetX = ((cols - 1) * spacing) / 2;
-  const offsetY = ((rows - 1) * spacing) / 2;
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      api.spawn(col * spacing - offsetX, row * spacing - offsetY, 0, 0, 0, 0);
-    }
-  }
-}
-
-/**
- * E8 varianty — sdílený spawn (pinned attractor + 2 free + joint), liší se jen integračním
- * módem. Stejný spawn umožňuje bit-by-bit porovnání modelshotů mezi módy.
- *
- * Setup: pinned M=10 na (0,0), free m=1 na (R±0.5, 0) s tečnou v_circ=√(GM/R)≈1.414, R=5.
- * Joint mezi free pixely (sdílená hrana). Plummer ε + pair extent dají mírnou precesi
- * — orbit cca 1.3× za 30 s. Drift mezi módy je relativní k pure-rapier baseline (E8r).
- */
-function e8Spawn(api: PresetAPI): void {
-  api.tuneRapier({ solverIterations: 16, pgsIterations: 4, canSleep: false });
-  const R = 5;
-  const M = 10;
-  const G = 1;
-  const vCirc = Math.sqrt((G * M) / R);
-  api.setG(G);
-  api.spawn(0, 0, 0, 0, 0, 0, M, true);
-  const a = api.spawn(R - 0.5, 0, 0, vCirc, 0, 0, 1, false);
-  const b = api.spawn(R + 0.5, 0, 0, vCirc, 0, 0, 1, false);
-  api.connect(a, b);
-}
-
-function e8Variants(): Preset[] {
-  return [
-    {
-      id: 'e8r',
-      name: 'E8r — Rapier baseline (joint orbit)',
-      description:
-        'Pure rapier mode (gravita přes addForce — broken pro orbital, ale joint solver trusted po E3-tune). REFERENCE pro porovnání hybrid-α/β.',
-      setup: (api) => {
-        api.setIntegration('rapier');
-        e8Spawn(api);
-      },
-      stopAtTime: 30,
-    },
-    {
-      id: 'e8a',
-      name: 'E8α — Velocity-Verlet split',
-      description:
-        'hybrid-α: manual jen kick (v += a·dt), Rapier dělá pos drift + joint solver. Standardní velocity-Verlet split. Měříme drift pos/KE/∑P vs E8r.',
-      setup: (api) => {
-        api.setIntegration('hybrid-α');
-        e8Spawn(api);
-      },
-      stopAtTime: 30,
-    },
-    {
-      id: 'e8b',
-      name: 'E8β — Save-zero-restore',
-      description:
-        'hybrid-β: manual full kick+drift, pak Rapier step s vel=0 (jen constraint impulses) → addback delta. Drift má manuální Euler. Měříme proti E8r/E8α.',
-      setup: (api) => {
-        api.setIntegration('hybrid-β');
-        e8Spawn(api);
-      },
-      stopAtTime: 30,
-    },
-  ];
-}
-
-/** Sdílený spawn 12 pixelů v D4 symetrii (E5 a E5m musí mít bit-identický setup). */
-function e5Spawn(api: PresetAPI): void {
-  const positions: [number, number][] = [
-    [-3, -3], [0, -3], [3, -3],
-    [-3, 0], [3, 0],
-    [-3, 3], [0, 3], [3, 3],
-    [-1.5, -1.5], [1.5, -1.5], [-1.5, 1.5], [1.5, 1.5],
-  ];
-  for (const [x, y] of positions) api.spawn(x, y, 0, 0, 0, 0);
-}
-
-/** Perf-test: N pixelů ve čtvercovém gridu se spacingem 4 U, počátek v centru. */
-function perfSpawn(api: PresetAPI, n: number): void {
-  const cols = Math.ceil(Math.sqrt(n));
-  const spacing = 4;
-  const offset = ((cols - 1) * spacing) / 2;
-  let placed = 0;
-  for (let row = 0; row < cols && placed < n; row++) {
-    for (let col = 0; col < cols && placed < n; col++) {
-      api.spawn(col * spacing - offset, row * spacing - offset, 0, 0, 0, 0);
-      placed++;
-    }
-  }
-}
-
-// Performance presety: měříme, kdy O(N²) párová gravita začne sytit 60 FPS.
-// Žádný stopAtTime — user sleduje FPS v STATS panelu, hlásí steady-state.
-PRESETS.push(
-  ...[100, 500, 1000, 2000].map((n): Preset => ({
-    id: `p${n}`,
-    name: `P${n} — Perf ${n} pixelů`,
-    description: `${n} pixelů ve čtvercovém gridu, manual + O(N²) gravita s G=1. Sleduj FPS.`,
-    setup: (api) => {
-      api.setIntegration('manual');
-      api.setG(1.0);
-      perfSpawn(api, n);
-    },
-  })),
-);
 
 /** Stav modelu serializovaný pro export do chatu. */
 export type Modelshot = {
@@ -463,7 +223,6 @@ export type Modelshot = {
   /**
    * `pe` = potenciální energie (z gravity kernelu, včetně případného window faktoru).
    * Bez `pe` nelze ověřit zachování ∑E = KE + PE — KE samo o sobě osciluje s PE.
-   * Pro mód `rapier` je `pe` typicky 0 (presety E1–E3 mají G=0).
    */
   diagnostics: { px: number; py: number; L: number; ke: number; pe: number };
 };

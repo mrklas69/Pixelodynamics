@@ -8,28 +8,71 @@ Surové nápady. `→ TODO` značí, že je nápad zralý a přesunutý do `TODO
 
 Když dva slepence (každý m≥2) se srazí, contact event vzniká **mezi dvěma pixely**, jeden v slepenci A, druhý v B. Současný `drainAndAutoJoint` automaticky vytvoří joint mezi nimi → ze 2 slepenců 1 větší. Logika je správná (duplicate guard se týká pixel pair, ne object pair), ale **empirický test chybí** — preset E12 = 2 head-on slepence m=2 by potvrdil. Edge mask by měl reflektovat nový joint na styčných hranách obou slepenců.
 
-### Composite object dataset (fáze 3+)
+### Composite object dataset (fáze 3+) — Stage 1 → DONE sezení 11
 
-Cache pre-computed state pro každý slepený objekt. Důvod: každý tick nepřepočítávat těžiště, momenty atd. — jen když se změní topologie (přibude/odejde pixel z objektu).
+Cache pre-computed state pro každý slepený objekt. Stage 1 (sezení 11) implementuje detection-only verzi v `src/sim/composite.ts`:
 
 ```ts
-type CompositeObject = {
+type Composite = {
   id: number;
-  pixelIds: number[];      // pixely v objektu
-  x: number; y: number;    // těžiště (Σ mᵢ·rᵢ / Σ mᵢ)
-  vx: number; vy: number;  // rychlost těžiště
-  r: number;               // orientace — fix-on-spawn + integrace přes rs
-  rs: number;              // úhlová rychlost objektu vůči těžišti
-  m: number;               // Σ mᵢ
-  I: number;               // moment setrvačnosti vůči těžišti
+  members: Pixel[];
+  com: { x, y };           // těžiště
+  linvel: { x, y };        // rychlost těžiště
+  angvel: number;          // L_total / I_total
+  mass: number;            // Σ m
+  inertia: number;         // Σ (m·|r_rel|² + m/6)  parallel axis (Steiner)
 };
 ```
 
-**Naming:** `rs` (ne VR/omega/w) — izomorfismus s `Pixel.rs`. Princip: podobné věci stejná jména.
+**Naming:** `rs` (ne VR/omega/w) — izomorfismus s `Pixel.rs`. Princip: podobné věci stejná jména. Composite zatím používá `angvel` (jednodušší v implementaci), bude vyrovnáno na `rs` v Stage 3.
 
 **Otevřené otázky:**
-- `r` (orientace složeného objektu) — fix-on-spawn nebo nepoužívat? Pro vykreslení centroidu (křížek) `r` není potřeba.
-- Update strategy: full recompute každý tick, nebo incremental update jen na změnách topologie? Při dynamické gravitaci se beztak musí pixel pozice číst → full recompute O(n) je akceptovatelný.
+- `r` (orientace složeného objektu) — fix-on-spawn nebo nepoužívat? Pro vykreslení centroidu (křížek) `r` není potřeba. Pro Stage 3 (composite-driven kinematics) je nutné.
+- Update strategy: full recompute každý tick, nebo incremental update jen na změnách topologie? Při dynamické gravitaci se beztak musí pixel pozice číst → full recompute O(n) je akceptovatelný (potvrzeno v Stage 1: per-display-tick 5 Hz, žádná perf regrese).
+
+### Magnetic merge algorithm (sezení 11 → TODO Stage 2/3)
+
+Uživatelův návrh inelastic merge přes magnetic edge attraction (4 kroky):
+
+1. **Test all object pairs** — jsou volné hrany v dosahu (`MAGNET_THRESHOLD`)? Volnou hranu si představuji jako silný magnet.
+2. **Pokud ano, vypočítej možný spoj.** Pozor na kolize dalších součástí obou objektů.
+3. **Sečti sumy hybnosti, momentu hybnosti, mechanické energie** — vše, co by se mělo zachovat.
+4. **Vytvoř nový slepenec** s pos = vážený střed podle hmotností. Nastav atributy tak, aby zachovat invarianty.
+
+**Stage 1 (sezení 11):** Composite + freeEdges + segmentDistance + detectMergeCandidates. Detection only, no merge. STATS counter "Merge cand." jako verifier.
+
+**Stage 2 (next session):** inelastic merge math:
+- M_total = M_A + M_B
+- CoM_new = (M_A·CoM_A + M_B·CoM_B) / M_total
+- V_new = (M_A·V_A + M_B·V_B) / M_total  →  ∑P preserved
+- L_total_rel_new = L_A_rel_new + L_B_rel_new (orbital + spin přes Steiner)
+- ω_new = L_total_rel_new / I_new  →  ∑L preserved
+- KE_new = ½·M·V_new² + ½·I·ω_new² < KE_init  (inelastic merge ztrácí relativní KE → pro fáze 4+ s pružnými spring jointy se ztracená KE rozetře do vibrace)
+
+**Stage 3 (next next session):** composite-driven kinematics nahrazuje FixedJoint v align režimu:
+- Per-tick: aggregate gravity force per-pixel → translational acceleration na CoM. Aggregate gravity torque kolem CoM → angular acceleration.
+- Update CoM kinematics: x += V·dt, V += a·dt; θ += ω·dt, ω += τ/I·dt.
+- Pixel pos = CoM + R(θ) · offset_local (offset je vázaný v okamžik merge).
+- Render: pixel.body.translation/rotation odvozeno z composite state per tick.
+- Auto-merge: per-tick proximity check → pokud detected, apply Stage 2 merge math, update offset_local.
+
+### Align rotation limitation (sezení 11 → IDEAS, motivace pro magnetic merge)
+
+Současný `align` mode v `createFixedJoint` snapuje `r=0` jen na 2 pixelech (a, b) joint pair. Pokud jeden je v existing rotujícím chainu, snap rotace **invaliduje joint anchory** v lokálním frame (anchor world pozice se po setRotation(0) změní → solver violence → overlap).
+
+**Workaround**: align je usable jen pro **fresh pair scenarios bez initial rotace** (E1align/E2align). Pro rotující bodies use not-align (E3 — věrná fyzika, conservation 0.09%).
+
+**Proper fix vyžaduje magnetic merge Stage 3** — composite-driven model nahrazuje FixedJoint anchor calc, takže "snap rotace" se stane součástí merge step (re-orient celé komponenty kolem CoM_new), ne per-pixel destruktivní operace.
+
+### Hard cutoff isolation (sezení 11 → IDEAS)
+
+Pixel mimo `cutoff = ε · cutoffFactor` od všech sousedů zamrzne (force=0 přesně, žádné "weak attraction"). Není to bug, ale model UX překvapení (uživatel intuitivně čeká `1/r²` všude, ale grid je culling decision).
+
+**Možné UX zlepšení:**
+- Vizuální signál pro isolated pixel — halo nebo barevný indicator.
+- Hover tooltip "force = 0 (isolated)".
+- Default `cutoffFactor` zvednout (např. 8) — cena: víc párů per tick.
+- Smoothstep tail extend přes celý cutoff range (force klesá do 0 hladce, ale pořád konečný dosah).
 
 ## Fyzikální mechaniky
 

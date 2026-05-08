@@ -1,12 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { World, saveZeroVel, restoreVelDelta } from '../sim/physics';
+  import { World } from '../sim/physics';
   import { stepGravity, stepGravityKickOnly } from '../sim/gravity';
-  import { computeDiagnostics, computeCentroid, computeObjectCount } from '../sim/diagnostics';
+  import { computeDiagnostics, computeCentroid, computeObjectStats, buildPixelIndex } from '../sim/diagnostics';
   import { computeFacts, emptyFacts, type Facts, type Champion } from '../sim/facts';
-  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, SKIP_RAPIER_IF_NO_JOINTS, AUTO_JOINT_ON_CONTACT } from '../sim/params';
+  import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, AUTO_JOINT_ON_CONTACT, MAGNET_THRESHOLD } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
-  import { createFixedJoint, removeJoint } from '../sim/joints';
+  import { createFixedJoint } from '../sim/joints';
+  import { buildComposites, detectMergeCandidates } from '../sim/composite';
   import { playSpawn } from '../audio/sfx';
   import { Renderer } from '../render/gl';
   import { createCamera, projection, screenToWorld, worldToScreen } from '../render/camera';
@@ -21,6 +22,7 @@
   let pixelCount = $state(0);
   let objectCount = $state(0);
   let connectionCount = $state(0);
+  let mergeCandidateCount = $state(0);
   let sumP = $state(0);
   let sumL = $state(0);
   let sumE = $state(0);
@@ -45,10 +47,10 @@
 
   // EXPERIMENT STATE
   let paused = $state(false);
-  // Default `hybrid-α`: bez jointů γ flag (SKIP_RAPIER_IF_NO_JOINTS) preskočí Rapier step
-  // → ekvivalent pure manual módu (sezení 9 ověřeno: ∑E drift 0.04%/30s s jointem).
-  // Jakmile user manuálně vytvoří joint, hybrid-α se aktivuje automaticky bez změny módu.
-  let integration = $state<IntegrationMode>('hybrid-α');
+  // Default `not-align`: gravita + Rapier joint solver + auto-jointing při kontaktu.
+  // Bez switch na `without-interaction` pixely procházejí, bez switch na `align` jointy
+  // zachovávají rotaci pixelů (anchor padne na midpoint).
+  let integration = $state<IntegrationMode>('not-align');
   let currentPreset = $state<Preset | null>(null);
   let stopAtTime: number | null = null; // null = neomezeno
   let stoppedAtTime = false; // už auto-stop proběhl pro current preset?
@@ -147,34 +149,7 @@
     centroidScreen = null;
     connectionCount = 0;
     objectCount = 0;
-  }
-
-  /**
-   * Manuální spojení posledních dvou spawned pixelů. Bez detekce dotyku po straně
-   * (TODO fáze 3); pixely můžou být kdekoli a anchor padne na midpoint mezi centry.
-   */
-  function connectLastTwo(): void {
-    if (!world) return;
-    const n = world.pixels.length;
-    if (n < 2) {
-      showToast('Potřebuješ aspoň 2 pixely', 1500);
-      return;
-    }
-    const a = world.pixels[n - 2]!;
-    const b = world.pixels[n - 1]!;
-    createFixedJoint(world, a, b);
-    connectionCount = world.joints.length;
-    showToast(`🔗 #${a.id} ↔ #${b.id}`, 1200);
-  }
-
-  /** Rozpojí všechny aktivní jointy. Click sound za každý break (rapid-fire OK díky poolu). */
-  function disconnectAll(): void {
-    if (!world || world.joints.length === 0) return;
-    const n = world.joints.length;
-    // Kopie — removeJoint mutuje world.joints, takže iterace přes původní array by selhala.
-    for (const j of world.joints.slice()) removeJoint(world, j);
-    connectionCount = 0;
-    showToast(`✂ ${n} joint${n === 1 ? '' : 'y'} zrušen${n === 1 ? '' : 'y'}`, 1500);
+    mergeCandidateCount = 0;
   }
 
   function showToast(msg: string, ms = 2500): void {
@@ -252,11 +227,11 @@
     stoppedAtTime = false;
     paused = false;
     const w = world;
-    // Reset Rapier tunings na defaulty před setup, aby předchozí preset (E3t) neovlivnil
-    // následující bez explicitní tuneRapier volby.
-    w.setSolverIterations(4);
-    w.setPgsIterations(1);
-    w.setDefaultCanSleep(true);
+    // Reset Rapier tunings na Pixelodynamics defaulty (32/8 — ne Rapier 4/1, ty jsou
+    // pro herní contacts) před setup. Preset může explicitně override přes tuneRapier.
+    w.setSolverIterations(32);
+    w.setPgsIterations(8);
+    w.setDefaultCanSleep(false);
     preset.setup({
       setG: (g) => (G = g),
       setH: (h) => (H = h),
@@ -277,6 +252,31 @@
     connectionCount = world.joints.length;
     showToast(`▶ ${preset.name}`, 1800);
   }
+
+  /**
+   * Reaguje na změnu integration módu — JEDNORÁZOVÁ akce při switch:
+   * Při switch na `align` projde existující pixely a snapne je do axis-aligned stavu
+   * (r=0, rs=0, lockRotations=true). Při switch z `align` rotace odemkne.
+   *
+   * VŮBEC NE per-tick — to by resetovalo Rapier joint warm-start solver cache → drift.
+   */
+  $effect(() => {
+    const w = world;
+    if (!w) return;
+    if (integration === 'align') {
+      for (const p of w.pixels) {
+        if (p.pinned) continue;
+        p.body.setRotation(0, true);
+        p.body.setAngvel(0, true);
+        p.body.lockRotations(true, true);
+      }
+    } else {
+      for (const p of w.pixels) {
+        if (p.pinned) continue;
+        p.body.lockRotations(false, true);
+      }
+    }
+  });
 
   /**
    * Edge bit pro anchor v lokálním frame pixelu. Dominantní osa určuje, kterou
@@ -337,7 +337,12 @@
         if (e.button !== 0) return;
         const rect = canvas.getBoundingClientRect();
         const wp = screenToWorld(camera, viewport, e.clientX - rect.left, e.clientY - rect.top);
-        w.spawnPixel(wp.x, wp.y);
+        const pixel = w.spawnPixel(wp.x, wp.y);
+        // Align mode: nový pixel hned zamknout, aby případný gravity-induced angular
+        // impuls od joint solveru (před prvním auto-jointem) nerozkmital rotaci.
+        if (integration === 'align') {
+          pixel.body.lockRotations(true, true);
+        }
         pixelCount = w.pixels.length;
         playSpawn();
       };
@@ -395,15 +400,14 @@
       let accumulator = 0;
 
       // Auto-jointing — po každém Rapier stepu drain contact Started events.
-      // Duplicate guard přes lineární scan v world.joints (typicky < 100 jointů).
-      // Manual mode nemá Rapier step → eventQueue prázdná → no-op.
+      // `createFixedJoint` má vlastní duplicate guard, takže volání je idempotent.
+      // `without-interaction` mode nemá Rapier step → eventQueue prázdná → no-op.
+      // Align flag propaguje destruktivní snap chování do createFixedJoint.
       const drainAndAutoJoint = (): void => {
         if (!AUTO_JOINT_ON_CONTACT) return;
+        const align = integration === 'align';
         w.drainContactStarts((a, b) => {
-          const exists = w.joints.some(
-            (j) => (j.a === a && j.b === b) || (j.a === b && j.b === a),
-          );
-          if (!exists) createFixedJoint(w, a, b);
+          createFixedJoint(w, a, b, align);
         });
       };
 
@@ -443,72 +447,35 @@
           let steps = 0;
           while (accumulator >= FIXED_DT && steps < MAX_STEPS_PER_FRAME) {
             const gp = { G, eps: GRAVITY_EPSILON, useGrid, cutoffFactor };
-            // γ flag: pokud nejsou aktivní jointy, hybrid-* shrnout na pure manual.
-            // Bypass Rapier step → konzervace ∑P/∑L na úroveň pure manual módu.
-            //
-            // **Auto-joint dependency**: contact events vyžadují, aby Rapier broadphase běžela
-            // — bez `rapier.step()` se nikdy neupdatuje a Started events nelze emitovat.
-            // Když je `AUTO_JOINT_ON_CONTACT=true`, γ skip pro hybrid-* deaktivujeme i bez
-            // jointů, abychom umožnili detekci dotyku. Pro pure 'manual' mód auto-joint
-            // nemá smysl (rapier.step() se vůbec nevolá) — uživatel to musí brát jako
-            // vlastnost manuálního módu.
-            const skipRapier =
-              SKIP_RAPIER_IF_NO_JOINTS && w.joints.length === 0 && !AUTO_JOINT_ON_CONTACT;
 
             switch (integration) {
-              case 'manual':
+              case 'without-interaction':
+                // Pure manual symplektický Euler — full kick + drift. Rapier step se
+                // nevolá, žádné kontakty, žádné jointy. Pixely procházejí. ∑P/∑L na úrovni
+                // f64 ulp.
                 for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
                   lastPE = stepGravity(w, gp, SUB_DT).pe;
                 }
                 break;
 
-              case 'rapier':
+              case 'not-align':
+              case 'align':
+                // Velocity-Verlet split: manual jen kick (v += a·dt), drift + joint solver
+                // dělá Rapier `world.step()`. Substepy gravity se aplikují všechny před
+                // jediným Rapier krokem — gravita je integrovaná SUBSTEPS× jemněji než pos
+                // drift, což snižuje truncation error close-encounteru.
+                //
+                // Rozdíl `not-align` vs `align` je jen v auto-joint chování (drainAndAutoJoint
+                // propaguje align flag) + jednorázový lock při switch módu/spawnu (viz $effect
+                // a onPointerDown). Sim loop body je identical — žádný per-tick reset.
+                for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
+                  lastPE = stepGravityKickOnly(w, gp, SUB_DT).pe;
+                }
                 w.step(FIXED_DT);
                 break;
-
-              case 'hybrid-naive':
-                // Dvojitá integrace — full manual + full Rapier. Reprodukce E5 (broken,
-                // historicky reference). NE doporučeno pro orbit dynamiku.
-                for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
-                  lastPE = stepGravity(w, gp, SUB_DT).pe;
-                }
-                if (!skipRapier) w.step(FIXED_DT);
-                break;
-
-              case 'hybrid-α':
-                if (skipRapier) {
-                  // γ optimalizace: bez constraintů degenerujeme na pure manual (full
-                  // kick+drift). Bez Rapier driftu by kick-only jen akumulovala vel
-                  // a pixely by se nehnuly.
-                  for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
-                    lastPE = stepGravity(w, gp, SUB_DT).pe;
-                  }
-                } else {
-                  // Velocity-Verlet split: manual jen kick (v += a·dt), drift dělá
-                  // Rapier `world.step()`. Substepy gravity se aplikují všechny před
-                  // jediným Rapier krokem — gravity je integrovaná SUBSTEPS× jemněji
-                  // než pos drift, což snižuje truncation error close-encounteru.
-                  for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
-                    lastPE = stepGravityKickOnly(w, gp, SUB_DT).pe;
-                  }
-                  w.step(FIXED_DT);
-                }
-                break;
-
-              case 'hybrid-β':
-                // Save-zero-restore: manual full kick+drift, pak Rapier step s vel=0
-                // (pos drift =0, jen constraint impulses) → addback delta.
-                for (let s = 0; s < GRAVITY_SUBSTEPS; s++) {
-                  lastPE = stepGravity(w, gp, SUB_DT).pe;
-                }
-                if (!skipRapier) {
-                  const saved = saveZeroVel(w);
-                  w.step(FIXED_DT);
-                  restoreVelDelta(w, saved);
-                }
-                break;
             }
-            // Auto-joint po Rapier kroku. Pro `manual` mode no-op (queue prázdná).
+            // Auto-joint po Rapier kroku. `without-interaction` mode → eventQueue prázdná
+            // (žádný Rapier step) → no-op.
             drainAndAutoJoint();
             simTime += FIXED_DT;
             accumulator -= FIXED_DT;
@@ -546,11 +513,7 @@
 
         // Centroid systému — overlay křížek. Per-frame O(N), zanedbatelné vs. simulace.
         const c = computeCentroid(w);
-        if (c) {
-          centroidScreen = worldToScreen(camera, viewport, c.cx, c.cy);
-        } else if (centroidScreen !== null) {
-          centroidScreen = null;
-        }
+        centroidScreen = c ? worldToScreen(camera, viewport, c.cx, c.cy) : null;
 
         // Render.
         renderer.reserve(w.pixels.length);
@@ -569,11 +532,9 @@
         }
         // Edge mask z jointů: pro každý joint určíme dominantní lokální osu anchoru
         // a maskneme příslušnou hranu. Component outline = boundary připojené komponenty
-        // bez vnitřních čar mezi pixely. O(J·N) přes indexOf, pro J malé OK; pro velké
-        // composite objects bude potřeba pixel→index Map.
+        // bez vnitřních čar mezi pixely. Lookup přes shared `buildPixelIndex`.
         if (w.joints.length > 0) {
-          const idxOf = new Map<typeof w.pixels[number], number>();
-          for (let i = 0; i < w.pixels.length; i++) idxOf.set(w.pixels[i]!, i);
+          const idxOf = buildPixelIndex(w);
           for (const j of w.joints) {
             const ai = idxOf.get(j.a);
             if (ai !== undefined) maskData[ai] = maskData[ai]! | edgeBit(j.anchorA);
@@ -602,7 +563,12 @@
         if (displayAccum > 0.5) {
           displayAccum = 0;
           connectionCount = w.joints.length;
-          objectCount = computeObjectCount(w);
+          const stats = computeObjectStats(w);
+          objectCount = stats.count;
+          // Magnetic merge candidate detection (Stage 1 — pure detection, no merge yet).
+          // Volné hrany komponent v dosahu MAGNET_THRESHOLD se počítají jako kandidáty.
+          const composites = buildComposites(w);
+          mergeCandidateCount = detectMergeCandidates(w, composites, MAGNET_THRESHOLD).length;
           const d = computeDiagnostics(w);
           sumP = Math.hypot(d.px, d.py);
           sumL = d.L;
@@ -616,7 +582,7 @@
           }
           sumE = e;
           deltaE = e0 === null ? 0 : e - e0;
-          facts = computeFacts(w, d.cx, d.cy);
+          facts = computeFacts(w, d.cx, d.cy, stats.largest);
         }
 
         requestAnimationFrame(loop);
@@ -639,9 +605,6 @@
     };
   });
 
-  function championLabel(c: Champion): string {
-    return c ? `#${c.id}` : '—';
-  }
 </script>
 
 <div class="app">
@@ -652,6 +615,7 @@
       <dt>Pixels</dt><dd>{pixelCount}</dd>
       <dt>Objects</dt><dd>{objectCount}</dd>
       <dt>Connections</dt><dd>{connectionCount}</dd>
+      <dt>Merge cand.</dt><dd>{mergeCandidateCount}</dd>
       <dt>∑P</dt><dd>{fmtSig4(sumP)} <span class="unit">kg·U/t</span></dd>
       <dt>∑L</dt><dd>{fmtSig4(sumL)} <span class="unit">kg·U²/t</span></dd>
       <dt>∑E</dt><dd>{fmtSig4(sumE)} <span class="unit">kg·U²/t²</span></dd>
@@ -665,10 +629,28 @@
       <dt>Spinniest</dt><dd>{@render champ(facts.mostSpin)}</dd>
       <dt>Most momentum</dt><dd>{@render champ(facts.mostMomentum)}</dd>
       <dt>Most ang. mom.</dt><dd>{@render champ(facts.mostAngularMomentum)}</dd>
-      <dt>Largest</dt><dd>{championLabel(facts.largest)}</dd>
+      <dt>Largest</dt><dd>{@render champ(facts.largest)}</dd>
       <dt>Most massive</dt><dd>{@render champ(facts.mostMassive)}</dd>
     </dl>
+
+    <h2>COMMANDS</h2>
+    <ul>
+      <li><kbd>LMB</kbd> spawn pixel</li>
+      <li><kbd>WASD</kbd> pan kamery (odemkne lock)</li>
+      <li><kbd>Y</kbd> / <kbd>X</kbd> zoom</li>
+      <li><kbd>kolečko</kbd> zoom</li>
+      <li><kbd>Space</kbd> pause / resume</li>
+      <li><kbd>Esc</kbd> odemknout kameru</li>
+    </ul>
+
     <button class="secondary" onclick={homeCamera}>Home camera (0,0)</button>
+    <button class="secondary" onclick={() => (paused = !paused)}>
+      {paused ? '▶ Resume' : '⏸ Pause'}
+    </button>
+    <button class="secondary" onclick={() => void exportModelshot(false)}>
+      📋 Export JSON
+    </button>
+    <button class="secondary" onclick={resetScene}>Clear</button>
   </aside>
 
   <main class="canvas-wrap">
@@ -676,7 +658,7 @@
 
     <div class="hud" aria-live="polite">
       <div class="hud-row">
-        <span class="lbl">cur</span>
+        <span class="lbl">cursor</span>
         {#if cursor}
           <span>x {fmtSig4(cursor.x)}</span>
           <span>y {fmtSig4(cursor.y)}</span>
@@ -727,56 +709,33 @@
 
   <aside class="panel right">
     <h2>SETTINGS</h2>
-    <label class="slider" title="Koeficient dostředivé síly (gravitační konstanta).">
+    <label class="slider">
       <span>G</span>
+      <span class="info" title="G — gravitační konstanta&#10;&#10;Násobí Plummer-softened sílu mezi každou dvojicí pixelů: F = G·m₁·m₂·r̂ / (r²+ε²)^{3/2}.&#10;&#10;Slider 0–20. G=0 → pixely letí balisticky. Vyšší G = silnější přitažlivost, ne větší dosah — cutoff je nezávislý.">?</span>
       <input type="range" min="0" max="20" step="0.1" bind:value={G} />
       <output>{G.toFixed(1)}</output>
     </label>
-    <label class="slider" title="Síla vazby (fáze 3+, zatím nepoužitá).">
+    <label class="slider">
       <span>H</span>
-      <input type="range" min="0" max="20" step="0.1" bind:value={H} />
+      <span class="info" title="H — konstanta vazby (pružnost)&#10;&#10;Plánováno pro fázi 4+ (distance/spring joint místo FixedJoint, damping). Zatím není napojen, slider disabled.">?</span>
+      <input type="range" min="0" max="20" step="0.1" bind:value={H} disabled />
       <output>{H.toFixed(1)}</output>
     </label>
-    <label class="slider" title="Cutoff radius spatial gridu jako násobek ε. Live-tunable.">
+    <label class="slider">
       <span>cutoff</span>
+      <span class="info" title="cutoff — dosah spatial gridu (násobek ε)&#10;&#10;Při hodnotě 5 a ε=1.5 je cutoff 7.5 U. Pixely vzdálenější než cutoff od souseda se vůbec NEúčastní gravitační interakce s tímto sousedem.&#10;&#10;POZOR: není to aproximace 1/r², je to culling decision. Isolated pixel za cutoff od všech sousedů → force = 0, pixel zamrzne bez ohledu na G.&#10;&#10;Smoothstep tail v posledním 1 U zóně dělá přechod hladký (konzervuje ∑E), ale dosah pořád konečný.">?</span>
       <input type="range" min="3" max="12" step="0.5" bind:value={cutoffFactor} />
       <output>{cutoffFactor.toFixed(1)}·ε</output>
     </label>
-    <label class="select" title="Integrační mód. Live override; preset reset to vrátí.">
+    <label class="select">
       <span>mód</span>
+      <span class="info" title="Integrační mód&#10;&#10;• without interaction — jen párová gravita, žádný Rapier step. Pixely procházejí jeden druhým. ∑P/∑L na úrovni f64 ulp. Pro pure orbital dynamiku.&#10;&#10;• not align — gravita + Rapier joint solver + auto-jointing při kontaktu. Slepence pruží, kmitají, rotují; po spojení se sjednotí výsledný moment hybnosti (joint preserve relative orientation). Konzervace ∑P/∑L drží do f32 šumu.&#10;&#10;• align — jako not-align, ale při auto-jointu DESTRUKTIVNĚ snapne pos na axis-aligned 1 U + r=0, rs=0, lockRotations. POZOR: align snap rotace na pixely v existing rotujícím slepenci porušuje anchory existing jointů → overlap. Použij align JEN pro scénáře bez initial rotace (E1align/E2align). Pro rotující bodies (E3) use not-align.">?</span>
       <select bind:value={integration}>
-        <option value="manual">manual</option>
-        <option value="rapier">rapier</option>
-        <option value="hybrid-naive">hybrid-naive</option>
-        <option value="hybrid-α">hybrid-α (Verlet split)</option>
-        <option value="hybrid-β">hybrid-β (save-zero)</option>
+        <option value="without-interaction">without interaction</option>
+        <option value="not-align">not align</option>
+        <option value="align">align</option>
       </select>
     </label>
-    <button class="reset" onclick={resetScene}>Reset scény</button>
-
-    <h2>COMMANDS</h2>
-    <ul>
-      <li><kbd>LMB</kbd> spawn pixel</li>
-      <li><kbd>WASD</kbd> pan kamery (odemkne lock)</li>
-      <li><kbd>Y</kbd> / <kbd>X</kbd> zoom</li>
-      <li><kbd>kolečko</kbd> zoom</li>
-      <li><kbd>Space</kbd> pause / resume</li>
-      <li><kbd>Esc</kbd> odemknout kameru</li>
-    </ul>
-
-    <button class="secondary" onclick={() => (paused = !paused)}>
-      {paused ? '▶ Resume' : '⏸ Pause'}
-    </button>
-    <button class="secondary" onclick={() => void exportModelshot(false)}>
-      📋 Export JSON
-    </button>
-    <button class="secondary" onclick={connectLastTwo} title="FixedJoint mezi 2 posledními pixely (anchor = midpoint)">
-      🔗 Spojit poslední 2 pixely
-    </button>
-    <button class="secondary" onclick={disconnectAll} title="Odstraní všechny aktivní jointy" disabled={connectionCount === 0}>
-      ✂ Rozpojit vše
-    </button>
-
     <h2>PRESETS</h2>
     <p class="hint">Mód: <strong>{integration}</strong> · <strong>{useGrid ? 'grid' : 'naive'}</strong>{currentPreset ? ` · ${currentPreset.id}` : ''}</p>
     {#each PRESETS as preset (preset.id)}
@@ -880,29 +839,36 @@
   .unit { color: #5b6370; font-size: 11px; }
   .slider {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto auto 1fr;
     align-items: center;
-    column-gap: 8px;
+    column-gap: 6px;
     row-gap: 2px;
     margin-bottom: 10px;
     font-size: 12px;
   }
-  .slider span { color: #7a8390; text-align: left; }
+  .slider > span:first-child { color: #7a8390; text-align: left; }
   .slider input[type="range"] {
     grid-column: 1 / -1;
     width: 100%;
     accent-color: #6f8ec1;
   }
-  .slider output { font-variant-numeric: tabular-nums; color: #cfd6e0; text-align: right; }
+  .slider output {
+    grid-column: 3;
+    font-variant-numeric: tabular-nums;
+    color: #cfd6e0;
+    text-align: right;
+  }
+  .slider input:disabled + output,
+  .slider:has(input:disabled) > span:first-child { color: #4a5260; }
   .select {
     display: grid;
-    grid-template-columns: 1fr auto;
+    grid-template-columns: auto auto 1fr;
     align-items: center;
-    gap: 4px 8px;
+    gap: 4px 6px;
     margin: 0 0 10px 0;
     font-size: 12px;
   }
-  .select span { color: #7a8390; text-align: left; }
+  .select > span:first-child { color: #7a8390; text-align: left; }
   .select select {
     grid-column: 1 / -1;
     width: 100%;
@@ -914,6 +880,23 @@
     font-size: 12px;
     font-family: inherit;
   }
+  /* Info ikona vedle parametru — multi-line tooltip přes title atribut. */
+  .info {
+    display: inline-block;
+    width: 14px;
+    height: 14px;
+    border: 1px solid #2a3142;
+    border-radius: 50%;
+    font-size: 9px;
+    text-align: center;
+    line-height: 12px;
+    color: #6f8ec1;
+    cursor: help;
+    font-weight: bold;
+    user-select: none;
+    background: #14181f;
+  }
+  .info:hover { background: #1d2433; border-color: #6f8ec1; }
   button {
     width: 100%;
     border: 1px solid #2a3142;
@@ -924,11 +907,11 @@
     cursor: pointer;
     border-radius: 3px;
   }
-  button.secondary, button.reset {
+  button.secondary {
     background: #1d2230;
     margin-top: 8px;
   }
-  button.secondary:hover, button.reset:hover { background: #242b3c; }
+  button.secondary:hover { background: #242b3c; }
   .id-link {
     width: auto;
     background: transparent;
@@ -968,7 +951,7 @@
   .hud .lock { color: #d8b76f; }
   .hud .free { color: #6f8ec1; }
   .hud .sep { color: #2a3142; }
-  .hud .lbl { color: #5b6370; min-width: 22px; }
+  .hud .lbl { color: #5b6370; min-width: 40px; }
   .hud .dim { color: #2a3142; }
 
   /* Centroid systému — křížek překrývající canvas, barva centroidu = jemně modrá.
@@ -1047,7 +1030,12 @@
     letter-spacing: 0.02em;
     white-space: nowrap;
   }
-  .footer-overlay div:first-child { color: #7a8390; }
+  /* AppName výrazněji než copyright řádek — větší, světlejší, tučný. */
+  .footer-overlay div:first-child {
+    color: #cfd6e0;
+    font-size: 12px;
+    font-weight: 600;
+  }
 
   .hint { font-size: 11px; color: #7a8390; margin: 0 0 6px; }
   .hint strong { color: #cfd6e0; font-weight: normal; }

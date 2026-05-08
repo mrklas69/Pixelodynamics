@@ -1,11 +1,9 @@
 // Parametry simulace, které se NELADÍ z UI — konstanty programu.
 // Lze upravit za běhu jen úpravou tohoto souboru.
 
-/** Maximální |linvel| na osu při spawnu pixelu (random uniform v [-max, +max], U/s). */
+/** Maximální |linvel| na osu při spawnu pixelu (random uniform v [-max, +max], U/s).
+ *  Drobná perturbace pro netriviální kontakty; rotace (r, rs) jsou při spawn nulové. */
 export const SPAWN_LINVEL_MAX = 0.1;
-
-/** Maximální |angvel| při spawnu (random uniform v [-max, +max], rad/s). */
-export const SPAWN_ANGVEL_MAX = 1.0;
 
 /**
  * Plummer softening ε pro párovou gravitaci. Brání singularitě F → ∞ při r → 0.
@@ -45,29 +43,22 @@ export const GRAVITY_USE_GRID = true;
 export const GRAVITY_CUTOFF_FACTOR = 5.0;
 
 /**
- * γ optimalizace pro `hybrid-α/β`: pokud `world.joints.length === 0` a žádné kontakty
- * (jakmile je zapneme), preskočit `world.step()` celkem — manuální Euler stačí. Když se
- * objeví joint, automaticky zapne se Rapier step.
- *
- * Důvod: orbitální fáze před slepenci nemá Rapier co řešit (G=0 globální, žádné
- * constraints), takže Rapier step jen drobně tlumí ∑P/∑L kvůli f32 bridge. Bypass dává
- * konzervaci na úroveň pure manual módu, dokud se joint scénář neaktivuje.
- *
- * `false` = vždycky zavolat Rapier step v hybrid módech (pro debug / přesný porovnání s
- * variantou bez jointu).
- */
-export const SKIP_RAPIER_IF_NO_JOINTS = true;
-
-/**
- * Auto-detekce dotyku po straně (sezení 10): při Rapier collision Started event mezi
- * dvojicí pixelů se automaticky vytvoří FixedJoint (pokud ještě neexistuje). `false`
- * vrací chování fáze 3 entry (jen manuální 🔗 tlačítko / preset connect).
- *
- * Důsledek: po `✂ Rozpojit vše` se pixely v kontaktu okamžitě znovu slepí, dokud
- * je něco neodstrčí. Pro experimentální reprodukovatelnost (presety předpokládající
- * nezávislé pixely během kolapsu — E5 hybrid-naive) lze flag dočasně shodit.
+ * Auto-detekce dotyku po straně: při Rapier collision Started event mezi dvojicí pixelů
+ * se automaticky vytvoří FixedJoint (pokud ještě neexistuje). Aktivní v `not-align`
+ * a `align` módech, ve `without-interaction` no-op (Rapier step se nevolá).
  */
 export const AUTO_JOINT_ON_CONTACT = true;
+
+/**
+ * Magnetic edge attraction threshold v U pro auto-spojování objektů (composites).
+ * Každá volná hrana objektu = "magnet" — pokud distance mezi volnými hranami dvou
+ * objektů klesne pod tento threshold, jsou kandidáty pro merge (Stage 2+).
+ *
+ * Default 0.1 U = magnet activates téměř při kontaktu (konzervativní, podobá se
+ * collision-based triggeru). Vyšší hodnoty vytvoří dlouhodosahové přitahování — pro
+ * G1024 s 1024 pixely by 1.0 U způsobilo okamžité splaceutí celé scény do koule.
+ */
+export const MAGNET_THRESHOLD = 0.1;
 
 /**
  * Šířka smoothstep transition zone v U na vnitřním okraji cutoffu.

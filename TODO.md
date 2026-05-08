@@ -25,9 +25,12 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] **Hybrid orchestrace** — Stage 2 hotová (sezení 9). E8r/E8α/E8β sweep: **α (Velocity-Verlet split) winner** — ∑E drift 0.04 %/30 s, joint distance preserve, rs=0.32 (gravita-induced precesní moment). β (save-zero-restore) broken — ∑E drift 13 %, rs ≈ 0 (joint solver nevidí stress). γ (SKIP_RAPIER_IF_NO_JOINTS) jako orthogonal flag, default true. UI default integration mode změněn na `hybrid-α`.
 - [x] Detekce „dotyku po straně" — sezení 10. `AUTO_JOINT_ON_CONTACT=true` v `params.ts`, collision groups + ActiveEvents na všech pixelech, drainAndAutoJoint v main loopu, `setContactsEnabled(false)` na joint (řeší E3 drift z dual constraint). γ flag zohledňuje auto-joint (rapier.step() musí běžet pro broadphase). E10 head-on + E11 trio empiricky validovány.
 - [x] Edge case: jeden pixel slepený se 2+ sousedy → struktura, ne řetězec. E11 ověřilo: prostřední pixel má 2 jointy (-X +X bity = 3 v edge mask), edge mask renderer to už podporoval ze sezení 8.
-- [ ] **Composite object dataset** (viz IDEAS.md) — `id, pixelIds, x, y, vx, vy, r, rs, m, I`. Update centroidu při změně topologie nebo per-tick.
-- [ ] Wire up Largest counter do STATS — až budou composite objects.
-- [ ] Hover infotipy rozšířit na CompositeObject (až budou)
+- [x] **Composite object dataset (Stage 1)** — sezení 11. `src/sim/composite.ts`: Composite type (id, members, com, linvel, angvel, mass, inertia s parallel axis theorem), buildComposites přes Union-Find, freeEdges (4 strany pixelu mínus shared via joint anchor dominantní osa), segmentDistance (Christer Ericson §5.1.9), detectMergeCandidates per-pair edge proximity. Per-display-tick (5 Hz) call, "Merge cand." badge v STATS. **Detection only, no merge yet.**
+- [~] **Magnetic merge Stage 2** — inelastic merge math. V_new = ∑P/M_total, ω_new = ∑L_rel_new_CoM / I_new. Pos pixelů = new_CoM + R(orientation) · offset_local. Apply per nejbližší candidate.
+- [ ] **Magnetic merge Stage 3** — composite-driven kinematics nahrazující FixedJoint v align režimu. Per-tick aggregate forces/torques → V/ω → CoM/orientation; pixel pos derived.
+- [x] Wire up Largest counter do STATS — sezení 11. `computeObjectStats` rozšířen o `largest: { repId, size }`, facts.computeFacts dostává jako param.
+- [ ] Hover infotipy rozšířit na CompositeObject (až bude Stage 3)
+- [ ] **E12** — pair-to-pair collision empirický test (carry-over ze sezení 10)
 
 ## Fáze 4 — hmotnost a pružnost
 
@@ -52,7 +55,7 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo · `[!]` priorita.
 - [x] Patička (centrovaná, dvouřádková, název aplikace + licence + repo)
 - [x] Pixely jako rámečky (hybrid border max(0.05U, 1px), připraveno pro vis. spojů)
 - [x] Hover infotipy nad pixely (id, x, y, vx, vy, r, rs, m, |v|)
-- [ ] Largest (Most-pixels-in-object) — až bude composite object dataset (sezení 10 přidalo `computeObjectCount` Union-Find, ale nemá per-object enumeraci pro pixel count championa)
+- [x] Largest (Most-pixels-in-object) — sezení 11. `computeObjectStats` v diagnostics rozšířen o size tracking; FACTS panel řádek "Largest" napojen.
 - [x] Connections counter — sezení 8 (manuální), sezení 10 (auto-joint reaguje)
 - [x] Objects counter — sezení 10. `computeObjectCount(world)` přes Union-Find s path compression a union by size. O((N+J)·α). Wire-up v display ticku + reset.
 - [x] Total energy E = KE + PE — sezení 6: ∑E + Δ∑E v STATS panelu, E₀ se zachytí při prvním display ticku po prvním sim kroku (PE platná). KE rozšířena o rotační složku ½·I·ω² (I=m/6).
