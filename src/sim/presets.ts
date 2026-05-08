@@ -272,7 +272,6 @@ export const PRESETS: Preset[] = [
       'G1024 — rychlejší kolaps, viditelnější detail. Ve `without-interaction` čistá ' +
       'gravitační dynamika bez kontaktů; v `not-align` cluster organicky lepí.',
     setup: (api) => {
-      api.setIntegration('without-interaction');
       api.setG(1.0);
       api.setUseGrid(true);
       gridSpawn(api, 10, 10, 3);
@@ -287,7 +286,6 @@ export const PRESETS: Preset[] = [
       'organicky lepí. Cutoff factor naladí slider v SETTINGS — pozor, hard cutoff je culling, ' +
       'ne approximation.',
     setup: (api) => {
-      api.setIntegration('without-interaction');
       api.setG(1.0);
       api.setUseGrid(true);
       gridSpawn(api, 32, 32, 3);

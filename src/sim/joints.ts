@@ -50,15 +50,25 @@ export type Joint = {
  *   - **same component** (a, b spojené nepřímo): geometry preserve, edge anchor v
  *     a-local frame z current world delta. Žádný rigid-transform (re-procesoval
  *     by stejnou komponentu).
- *   - Po vložení jointu vždy `lockRotations(true)` na všechny dotčené members a
- *     `recomputeCompositeOffsets` pro celou nově unified komponentu.
+ *   - Po vložení jointu vždy `recomputeCompositeOffsets` pro celou nově unified
+ *     komponentu (Stage 3 sets compositeOffsetX/Y, Stage 3.2 sets compositeTheta).
+ *     `lockRotations` se NEPOUŽÍVÁ — composite rotation je řízena manuálně přes
+ *     `stepCompositesAlign` (theta_new = theta_old + ω·dt → setRotation pro všechny).
  *
  * **Idempotent**: pokud už joint mezi týmiž pixely existuje (v libovolném pořadí a/b),
  * vrátí ho bez side-effects (žádný click, žádný snap, žádná Rapier insertion).
  *
+ * **Same-component v align mode** (a, b spojené nepřímo přes řetězec dalších jointů):
+ * vrací `null` a nic nevytváří. Důvod: ±0.5 anchory by skončily v world pozicích posunutých
+ * o `(|dxL|−1) U` (a-local frame), pokud a a b nejsou edge-touching. Solver pak iteruje
+ * proti existujícím chain anchorům → composite vystřelí. Auto-joint má duplicate filtr
+ * v `autoJointAlign` (nikdy nezavolá createFixedJoint pro same-component pair). Manuální
+ * volání `connect()` z presetu se týká fresh pairs (initial wire-up) — same-component
+ * je tam edge case a no-op je správnější než broken joint.
+ *
  * Zvuk: playClick() jen při skutečném create.
  */
-export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolean = false): Joint {
+export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolean = false): Joint | null {
   // Duplicate guard — single source of truth, ať volá auto-joint i manual call.
   // O(J) lineární scan; pro typické J<100 je to zanedbatelné.
   for (const existing of world.joints) {
@@ -94,19 +104,14 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
     const chainB = collectComponent(world, b);
 
     if (chainA.includes(b)) {
-      // Same component (a, b spojené nepřímo přes jiné jointy) — joint je redundantní
-      // rigid sub-loop. Geometry preserve, anchor v a-local frame z current world delta.
-      // Žádný snap (rozbil by chain), žádný rigid-transform (re-procesoval by stejnou
-      // komponentu dvakrát).
-      const ta0 = a.body.translation();
-      const tb0 = b.body.translation();
-      const ra0 = a.body.rotation();
-      const cosT = Math.cos(ra0);
-      const sinT = Math.sin(ra0);
-      const dxL = cosT * (tb0.x - ta0.x) + sinT * (tb0.y - ta0.y);
-      const dyL = -sinT * (tb0.x - ta0.x) + cosT * (tb0.y - ta0.y);
-      alignXAxis = Math.abs(dxL) >= Math.abs(dyL);
-      alignSign = alignXAxis ? (dxL >= 0 ? 1 : -1) : (dyL >= 0 ? 1 : -1);
+      // Same component (a, b spojené nepřímo přes řetězec dalších jointů) — pridání
+      // dalšího ±0.5 jointu by vytvořilo broken constraint, pokud a a b nejsou
+      // edge-touching v dominantní ose host frame (typicky |dxL|>1 → world anchor
+      // mismatch ≈ |dxL|−1 U). Solver pak iteruje proti existujícím chain anchorům
+      // → composite vystřelí (pozorováno v E14 modelshotu po S13).
+      // Skip create úplně, vrať null — caller by měl ignore (auto-joint má vlastní
+      // filtr v autoJointAlign, manual connect z presetu se týká fresh pairs).
+      return null;
     } else if (chainA.length === 1 && chainB.length === 1) {
       // Fresh-fresh: symmetric snap kolem midpointu (centroid preserved, ∑P = 0
       // pro nehybný pár). Behavior beze změny od S11 implementace.
@@ -130,8 +135,6 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
         a.body.setTranslation({ x: mx, y: my - 0.5 * sign }, true);
         b.body.setTranslation({ x: mx, y: my + 0.5 * sign }, true);
       }
-      a.body.lockRotations(true, true);
-      b.body.lockRotations(true, true);
       alignXAxis = xAxis;
       alignSign = sign;
     } else {
@@ -214,12 +217,10 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
       for (const p of hostChain) {
         p.body.setLinvel({ x: Vx, y: Vy }, true);
         p.body.setAngvel(0, true);
-        p.body.lockRotations(true, true);
       }
       for (const p of guestChain) {
         p.body.setLinvel({ x: Vx, y: Vy }, true);
         p.body.setAngvel(0, true);
-        p.body.lockRotations(true, true);
       }
 
       // alignSign mapuje host-frame sign na anchorA-relative sign (anchorA = a-side).
@@ -296,6 +297,89 @@ export function createFixedJoint(world: World, a: Pixel, b: Pixel, align: boolea
 }
 
 /**
+ * Auto-joint v `align` modu — wrapper kolem `createFixedJoint(align=true)`, který
+ * řeší dva problémy odhalené v E14 modelshotu po S13:
+ *
+ * 1. **Same-component filter** — Rapier narrow-phase generuje contact eventy pro
+ *    všechny AABB-overlapping páry (Y offset 0.07 → a2-b0 i a1-b0 i a2-b1 ve stejném
+ *    ticku). Po prvním cross-component merge jsou všechny další eventy "same component"
+ *    a `createFixedJoint(align=true)` pro ně teď vrací null. Bez tohoto filteru by
+ *    solver iteroval proti broken anchorům.
+ *
+ * 2. **Endpoint picking** — kontakt event přichází s libovolnou dvojicí pixelů
+ *    (typicky NEjsou koncové pixely chainů). Pokud bychom přímo volali
+ *    createFixedJoint(a, b, true), rigid-transform by spočítal targetGuestPos =
+ *    hostPos + 1U. Když ale `a` je interní pixel host chainu, target leží uprostřed
+ *    chainu → překryv 2 pixelů na jedné pozici. Místo toho najdeme **endpoint pixely**
+ *    (degree ≤ 1 v rámci chain joint graphu) nejblíže ke kontaktnímu páru a joint
+ *    vytvoříme mezi nimi.
+ *
+ * Vrací nově vytvořený joint, existing duplicate, nebo null pokud byly chains
+ * already merged.
+ */
+export function autoJointAlign(world: World, a: Pixel, b: Pixel): Joint | null {
+  const chainA = collectComponent(world, a);
+  const chainB = collectComponent(world, b);
+
+  // Filter 1 — already in same component (redundance po předchozím merge tento tick).
+  if (chainA.includes(b)) return null;
+
+  // Filter 2 — endpoint picking. Free-edge pair nejblíže ke kontaktnímu páru.
+  const aPos = a.body.translation();
+  const bPos = b.body.translation();
+  const hostEndpoint = pickClosestEndpoint(chainA, bPos, world);
+  const guestEndpoint = pickClosestEndpoint(chainB, aPos, world);
+
+  return createFixedJoint(world, hostEndpoint, guestEndpoint, true);
+}
+
+/**
+ * Vybere endpoint pixel chainu (pixel s degree ≤ 1 v rámci chain joint graphu)
+ * nejblíže k `target` poloze. Pro singleton chain vrací jediný pixel.
+ *
+ * Pro lineární chain m=N jsou typicky 2 endpointy (oba konce); endpoint nejblíž
+ * `target` se vybírá jako kontaktní bod pro merge. Pro větvenou topologii může
+ * být endpointů víc, fallback na všechny degree-1 pixely. Pro cyklickou strukturu
+ * (žádný degree ≤ 1) fallback na chain[0] — neměla by nastat v Pixelodynamics
+ * (cyklický joint graph by znamenal redundant constraint).
+ */
+function pickClosestEndpoint(
+  chain: Pixel[],
+  target: { x: number; y: number },
+  world: World,
+): Pixel {
+  if (chain.length === 1) return chain[0]!;
+
+  const chainSet = new Set(chain);
+  const endpoints: Pixel[] = [];
+  for (const p of chain) {
+    let degree = 0;
+    for (const j of world.joints) {
+      if ((j.a === p && chainSet.has(j.b)) || (j.b === p && chainSet.has(j.a))) {
+        degree++;
+        if (degree > 1) break; // nepotřebujeme přesný degree, jen ≤ 1 vs > 1
+      }
+    }
+    if (degree <= 1) endpoints.push(p);
+  }
+  if (endpoints.length === 0) return chain[0]!;
+
+  let best = endpoints[0]!;
+  let bestDist = Infinity;
+  for (const p of endpoints) {
+    const t = p.body.translation();
+    const dx = t.x - target.x;
+    const dy = t.y - target.y;
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = p;
+    }
+  }
+  return best;
+}
+
+/**
  * BFS po jointech najde všechny pixely v komponentě obsahující `seed`. Použito po
  * createFixedJoint(align=true) pro recompute compositeOffsetX/Y po změně topologie.
  */
@@ -317,18 +401,24 @@ function collectComponent(world: World, seed: Pixel): Pixel[] {
 }
 
 /**
- * Recompute `compositeOffsetX/Y` pro všechny členy komponenty obsahující `seed`. Volat
- * po změně topologie (nový joint v align mode, magnet merge). Singleton (1 člen) → null.
+ * Recompute composite frame state pro všechny členy komponenty obsahující `seed`. Volat
+ * po změně topologie (nový joint v align mode, magnet merge).
  *
- * Frame: θ = `seed.body.rotation()` (po align snap = 0; pro chains se připojí fresh
- * pixel s r=0 nebo merge přes chains s nějakým θ — všichni members mají stejné r dík
- * lockRotations + manual setRotation). Offset = R(−θ)·(pos − CoM).
+ * Stage 3: `compositeOffsetX/Y` (local offset v composite frame).
+ * Stage 3.2: `compositeTheta` (rotace, sdílená všemi members; `stepCompositesAlign`
+ * ji per-tick driveuje přes ω·dt).
+ *
+ * Singleton (1 člen) → všechny tři pole null.
+ *
+ * Frame: θ_init = `seed.body.rotation()` v okamžik volání (po Stage 3.1 rigid-transform
+ * jsou všichni members na hostθ). Offset = R(−θ_init)·(pos − CoM).
  */
 function recomputeCompositeOffsets(world: World, seed: Pixel): void {
   const members = collectComponent(world, seed);
   if (members.length < 2) {
     seed.compositeOffsetX = null;
     seed.compositeOffsetY = null;
+    seed.compositeTheta = null;
     return;
   }
 
@@ -354,6 +444,7 @@ function recomputeCompositeOffsets(world: World, seed: Pixel): void {
     const dy = t.y - cy;
     p.compositeOffsetX = cosT * dx + sinT * dy;
     p.compositeOffsetY = -sinT * dx + cosT * dy;
+    p.compositeTheta = theta;
   }
 }
 

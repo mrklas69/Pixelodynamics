@@ -6,12 +6,13 @@
   import { computeFacts, emptyFacts, type Facts, type Champion } from '../sim/facts';
   import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, AUTO_JOINT_ON_CONTACT, MAGNET_THRESHOLD } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
-  import { createFixedJoint } from '../sim/joints';
+  import { createFixedJoint, autoJointAlign } from '../sim/joints';
   import {
     buildComposites,
     detectMergeCandidates,
     applyMerge,
     stepCompositesAlign,
+    computeCompositeFor,
   } from '../sim/composite';
   import { playSpawn } from '../audio/sfx';
   import { Renderer } from '../render/gl';
@@ -94,6 +95,15 @@
     r: number; rs: number;
     m: number;
     speed: number;
+    /** Composite info, pokud je pixel členem slepence (≥ 2 členů). null = singleton. */
+    composite: {
+      count: number;
+      mass: number;
+      comX: number; comY: number;
+      vx: number; vy: number;
+      speed: number;
+      angvel: number;
+    } | null;
   } | null>(null);
 
   function formatTime(s: number): string {
@@ -245,7 +255,11 @@
       spawn: (x, y, vx, vy, r, rs, m = 1, pinned = false) =>
         w.spawnPixelExact(x, y, vx, vy, r, rs, m, pinned),
       connect: (a, b) => {
-        createFixedJoint(w, a, b);
+        // Propaguj aktuální integration mode — chain joints v `align` musí mít
+        // compositeOffsetX/Y nastavené (jinak stepCompositesAlign čte `?? 0` →
+        // všichni members kolabují na CoM). Pro fresh-pair connect symmetric snap
+        // kolem midpointu nemění geometrii (1U spawn = 1U výsledek).
+        createFixedJoint(w, a, b, integration === 'align');
       },
       tuneRapier: (opts) => {
         if (opts.solverIterations !== undefined) w.setSolverIterations(opts.solverIterations);
@@ -260,8 +274,9 @@
 
   /**
    * Reaguje na změnu integration módu — JEDNORÁZOVÁ akce při switch:
-   * Při switch na `align` projde existující pixely a snapne je do axis-aligned stavu
-   * (r=0, rs=0, lockRotations=true). Při switch z `align` rotace odemkne.
+   * Při switch na `align` snapne existující pixely do axis-aligned stavu (r=0, rs=0).
+   * Stage 3.2: `lockRotations` se nepoužívá — composite rotation v `align` mode
+   * je řízena explicitně přes `stepCompositesAlign` (theta drift + setRotation).
    *
    * VŮBEC NE per-tick — to by resetovalo Rapier joint warm-start solver cache → drift.
    */
@@ -273,12 +288,6 @@
         if (p.pinned) continue;
         p.body.setRotation(0, true);
         p.body.setAngvel(0, true);
-        p.body.lockRotations(true, true);
-      }
-    } else {
-      for (const p of w.pixels) {
-        if (p.pinned) continue;
-        p.body.lockRotations(false, true);
       }
     }
   });
@@ -342,12 +351,10 @@
         if (e.button !== 0) return;
         const rect = canvas.getBoundingClientRect();
         const wp = screenToWorld(camera, viewport, e.clientX - rect.left, e.clientY - rect.top);
-        const pixel = w.spawnPixel(wp.x, wp.y);
-        // Align mode: nový pixel hned zamknout, aby případný gravity-induced angular
-        // impuls od joint solveru (před prvním auto-jointem) nerozkmital rotaci.
-        if (integration === 'align') {
-          pixel.body.lockRotations(true, true);
-        }
+        w.spawnPixel(wp.x, wp.y);
+        // Stage 3.2: žádný lockRotations. V align mode je fresh pixel singleton
+        // (compositeTheta=null → stepCompositesAlign skip), Rapier integruje rotation
+        // normálně. Po auto-joint do composite převezme řízení stepCompositesAlign.
         pixelCount = w.pixels.length;
         playSpawn();
       };
@@ -369,6 +376,8 @@
         if (p) {
           const t = p.body.translation();
           const v = p.body.linvel();
+          // Composite info — BFS po jointech od pixelu, null pro singleton.
+          const c = computeCompositeFor(w, p);
           hover = {
             sx: e.clientX,
             sy: e.clientY,
@@ -381,6 +390,18 @@
             rs: p.body.angvel(),
             m: p.m,
             speed: Math.hypot(v.x, v.y),
+            composite: c
+              ? {
+                  count: c.members.length,
+                  mass: c.mass,
+                  comX: c.com.x,
+                  comY: c.com.y,
+                  vx: c.linvel.x,
+                  vy: c.linvel.y,
+                  speed: Math.hypot(c.linvel.x, c.linvel.y),
+                  angvel: c.angvel,
+                }
+              : null,
           };
         } else {
           hover = null;
@@ -405,14 +426,20 @@
       let accumulator = 0;
 
       // Auto-jointing — po každém Rapier stepu drain contact Started events.
-      // `createFixedJoint` má vlastní duplicate guard, takže volání je idempotent.
+      // `not-align`: createFixedJoint má duplicate guard, midpoint anchor je bezpečný.
+      // `align`: autoJointAlign filtruje same-component eventy + vybírá endpoint pár
+      //   chainů (kontaktní událost typicky NEní mezi koncovými pixely; rigid-transform
+      //   na non-endpoint pivotu by spadl na obsazenou pozici).
       // `without-interaction` mode nemá Rapier step → eventQueue prázdná → no-op.
-      // Align flag propaguje destruktivní snap chování do createFixedJoint.
       const drainAndAutoJoint = (): void => {
         if (!AUTO_JOINT_ON_CONTACT) return;
         const align = integration === 'align';
         w.drainContactStarts((a, b) => {
-          createFixedJoint(w, a, b, align);
+          if (align) {
+            autoJointAlign(w, a, b);
+          } else {
+            createFixedJoint(w, a, b, false);
+          }
         });
       };
 
@@ -485,7 +512,7 @@
                   lastPE = stepGravityKickOnly(w, gp, SUB_DT).pe;
                 }
                 w.step(FIXED_DT);
-                stepCompositesAlign(w);
+                stepCompositesAlign(w, FIXED_DT);
                 break;
             }
             // Auto-joint po Rapier kroku. `without-interaction` mode → eventQueue prázdná
@@ -579,19 +606,16 @@
           connectionCount = w.joints.length;
           const stats = computeObjectStats(w);
           objectCount = stats.count;
-          // Magnetic merge: detection (Stage 1) + apply (Stage 2). Per display tick (5 Hz).
+          // Magnetic merge: detection (Stage 1) + apply (Stage 2/3.1). Per display tick (5 Hz).
           // Volné hrany komponent v dosahu MAGNET_THRESHOLD jsou kandidáty na inelastic merge.
-          // Apply jen v `not-align`:
-          //   - `without-interaction`: Rapier step se nevolá → FixedJoint by visel bez efektu.
-          //   - `align`: position-snap mode konfliktní se Stage 2 position-preserving math
-          //     (Stage 2 sice zachová ∑P/∑L, ale geometrie zůstává na non-grid pozicích →
-          //     mix align + not-align jointů v 1 slepenci = broken cluster). Auto-joint
-          //     s align=true v align módu je jediná správná cesta, dokud Stage 3
-          //     (composite-driven kinematics) nenahradí FixedJoint úplně.
+          // `without-interaction` skip — Rapier step se nevolá → FixedJoint by visel bez efektu.
+          // `not-align` jede Stage 2 math (∑P + ∑L preserved). `align` jede Stage 3.1
+          // chain-merge cestu přes createFixedJoint (∑P preserved, ω=0 explicit).
           const composites = buildComposites(w);
           const candidates = detectMergeCandidates(w, composites, MAGNET_THRESHOLD);
           mergeCandidateCount = candidates.length;
-          if (integration === 'not-align') {
+          if (integration === 'not-align' || integration === 'align') {
+            const align = integration === 'align';
             // Consumed-set guard: v jednom display ticku každou komponentu mergni jen
             // jednou (kdyby compA byla v candidate (A,B) i (A,C), apply na (A,B)
             // změní A → kandidát (A,C) se přepočítá příští display tick z čerstvého
@@ -599,7 +623,7 @@
             const consumed = new Set<number>();
             for (const c of candidates) {
               if (consumed.has(c.compA.id) || consumed.has(c.compB.id)) continue;
-              if (applyMerge(w, c)) {
+              if (applyMerge(w, c, align)) {
                 consumed.add(c.compA.id);
                 consumed.add(c.compB.id);
               }
@@ -734,6 +758,16 @@
           <dt>rs</dt><dd>{fmtSig4(hover.rs)} rad/s</dd>
           <dt>m</dt><dd>{fmtSig4(hover.m)}</dd>
         </dl>
+        {#if hover.composite}
+          <div class="tip-head">Slepenec ({hover.composite.count}×)</div>
+          <dl>
+            <dt>M</dt><dd>{fmtSig4(hover.composite.mass)}</dd>
+            <dt>CoM</dt><dd>{fmtSig4(hover.composite.comX)}, {fmtSig4(hover.composite.comY)}</dd>
+            <dt>V</dt><dd>{fmtSig4(hover.composite.vx)}, {fmtSig4(hover.composite.vy)}</dd>
+            <dt>|V|</dt><dd>{fmtSig4(hover.composite.speed)}</dd>
+            <dt>ω</dt><dd>{fmtSig4(hover.composite.angvel)} rad/s</dd>
+          </dl>
+        {/if}
       </div>
     {/if}
 
@@ -765,7 +799,7 @@
     </label>
     <label class="select">
       <span>mód</span>
-      <span class="info" title="Integrační mód&#10;&#10;• without interaction — jen párová gravita, žádný Rapier step. Pixely procházejí jeden druhým. ∑P/∑L na úrovni f64 ulp. Pro pure orbital dynamiku.&#10;&#10;• not align — gravita + Rapier joint solver + auto-jointing při kontaktu. Slepence pruží, kmitají, rotují; po spojení se sjednotí výsledný moment hybnosti (joint preserve relative orientation). Konzervace ∑P/∑L drží do f32 šumu.&#10;&#10;• align — jako not-align, ale při auto-jointu DESTRUKTIVNĚ snapne pos na axis-aligned 1 U + r=0, rs=0, lockRotations. POZOR: align snap rotace na pixely v existing rotujícím slepenci porušuje anchory existing jointů → overlap. Použij align JEN pro scénáře bez initial rotace (E1align/E2align). Pro rotující bodies (E3) use not-align.">?</span>
+      <span class="info" title="Integrační mód&#10;&#10;• without interaction — jen párová gravita, žádný Rapier step. Pixely procházejí jeden druhým. ∑P/∑L na úrovni f64 ulp. Pro pure orbital dynamiku.&#10;&#10;• not align — gravita + Rapier joint solver + auto-jointing při kontaktu. Slepence pruží, kmitají, rotují; po spojení se sjednotí výsledný moment hybnosti. Konzervace ∑P/∑L drží do f32 šumu. Magnet merge Stage 2 (∑P + ∑L preserved).&#10;&#10;• align — composite-driven kinematics (Stage 3 + 3.2): při auto-jointu / magnet mergi rigid-transform menšího řetězce do host frame, anchory ±0.5 U na sdílené hraně, ∑P preserved, ω explicitně driveuje rotaci celé komponenty (θ_new = θ_old + ω·dt v stepCompositesAlign). Angular momentum loss explicit (ω=0 po merge). Vhodné pro chain/cluster scénáře s deterministickou geometrií.">?</span>
       <select bind:value={integration}>
         <option value="without-interaction">without interaction</option>
         <option value="not-align">not align</option>
@@ -773,7 +807,6 @@
       </select>
     </label>
     <h2>PRESETS</h2>
-    <p class="hint">Mód: <strong>{integration}</strong> · <strong>{useGrid ? 'grid' : 'naive'}</strong>{currentPreset ? ` · ${currentPreset.id}` : ''}</p>
     {#each PRESETS as preset (preset.id)}
       <button
         class="preset"
@@ -1073,8 +1106,6 @@
     font-weight: 600;
   }
 
-  .hint { font-size: 11px; color: #7a8390; margin: 0 0 6px; }
-  .hint strong { color: #cfd6e0; font-weight: normal; }
   button.preset {
     text-align: left;
     background: #161b27;

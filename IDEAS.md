@@ -31,11 +31,13 @@ Implementováno v `src/sim/composite.ts`. Stage 2/3 viz „Magnetic merge algori
 - `stepCompositesAlign(world)` po Rapier step override pos/rot/linvel/angvel z aggregate state.
 - 6-pixel chain v G=20 po 60 s: 1.000 U distances přesně, composite rotates synchronně (Rapier joint solver dodá angular impulses přes lockRotations, my propagujeme).
 
-**Stage 3.1 (S13) — DONE.** `createFixedJoint(align=true)` 4-cestný rozcestník (same-component / fresh-fresh / fresh+chain / chain+chain). Menší řetězec rigid-transformován **celý** (rotace o Δθ kolem guestPos + translace) v host local frame. Internal joint anchory v body local frames preserved. ∑P preserved (V_unified = ∑P/M), ω=0 (explicit angular momentum loss). Bonus fix: fresh+chain s rotated chainem byl **také rozbitý** (`setRotation(0)` na chain pixelu lámal anchory), sjednocená cesta to vyřešila. E14 preset hotový, modelshot validace odložena na S14.
+**Stage 3.1 (S13) — DONE.** `createFixedJoint(align=true)` 4-cestný rozcestník (same-component / fresh-fresh / fresh+chain / chain+chain). Menší řetězec rigid-transformován **celý** (rotace o Δθ kolem guestPos + translace) v host local frame. Internal joint anchory v body local frames preserved. ∑P preserved (V_unified = ∑P/M), ω=0 (explicit angular momentum loss). Bonus fix: fresh+chain s rotated chainem byl **také rozbitý** (`setRotation(0)` na chain pixelu lámal anchory), sjednocená cesta to vyřešila.
 
-**Stage 3.2 (TODO)** — composite rotation explicit handling: odstranit lockRotations + drive θ čistě architektonicky.
+**Stage 3.1 bug fixes (S14) — DONE.** E14 modelshot odhalil 2 critical bugy: (1) `createFixedJoint(align=true)` chain+chain volil host/guest pixel z `(a,b)` argumentů contact eventu, ne z edge proximity → pokud kontakt s interním pixelem hostu, target leží na obsazené pozici → překryv. Fix: nový `autoJointAlign` v `joints.ts` filtruje same-component eventy + vybírá endpoint pixely (degree ≤ 1) nejblíže kontaktnímu páru. Same-component branch v `createFixedJoint` early-return null. (2) `connect()` v preset API volal `createFixedJoint` bez align flag → chain joints v not-align mode → compositeOffsetX/Y null → kolaps na CoM v align mode. Fix: `connect` propaguje `integration === 'align'` flag.
 
-**Magnet re-aktivace v align mode (TODO)** — po Stage 3.2: applyMerge + recomputeOffsets v rámci composite-driven framework.
+**Stage 3.2 (S14) — DONE.** Composite rotation explicit handling: `Pixel.compositeTheta` field (sdílen všemi members), `stepCompositesAlign(world, dt)` driveuje `θ_new = θ_old + ω·dt` + setRotation propagace, `lockRotations` zcela odstraněno z align mode. Joint solver volně iteruje individual rotations, my každý tick override z aggregate state. Bez user-visible benefitu pro ω=0 scénáře, ale architecturally clean a odblokoval magnet re-aktivaci.
+
+**Magnet re-aktivace v align mode (S14) — DONE.** `applyMerge(world, candidate, align)` rozšířen o flag; v align cestě deleguje na `createFixedJoint(..., true)` (Stage 3.1 chain-merge), v not-align beze změny. Auto-joint a magnet sdílí jednu cestu v align mode (single source of truth pro merge geometry).
 
 ### Align rotation limitation (sezení 11 → IDEAS, motivace pro magnetic merge)
 

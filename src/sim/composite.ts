@@ -120,6 +120,29 @@ export function buildComposites(world: World): Composite[] {
   return composites;
 }
 
+/**
+ * Spočítá aggregate state composity, jejíž členem je `seed`. BFS po jointech najde
+ * komponentu; pro singleton (1 člen) vrací `null`. Použito pro hover infotipy nad
+ * slepencem (per pointermove, O(členů+joints)) — buildComposites by byl overkill,
+ * tady stačí lokální BFS.
+ */
+export function computeCompositeFor(world: World, seed: Pixel): Composite | null {
+  const visited = new Set<Pixel>([seed]);
+  const queue: Pixel[] = [seed];
+  while (queue.length > 0) {
+    const p = queue.shift()!;
+    for (const j of world.joints) {
+      const other = j.a === p ? j.b : j.b === p ? j.a : null;
+      if (other && !visited.has(other)) {
+        visited.add(other);
+        queue.push(other);
+      }
+    }
+  }
+  if (visited.size < 2) return null;
+  return computeAggregate([...visited], 0);
+}
+
 function computeAggregate(members: Pixel[], id: number): Composite {
   let mass = 0;
   let comX = 0;
@@ -332,11 +355,11 @@ export function detectMergeCandidates(
 /**
  * Stage 2 — inelastic merge math + FixedJoint create.
  *
- * Spočítá nový aggregate state pro union compA ∪ compB tak, aby se zachovaly
- * ∑P a ∑L (KE klesne o relativní část — to je inelastic ztráta, ve fázi 4+ s
- * pružnými spring jointy by se rozetřela do vibrace). Pak snap všech členů na
- * rigid-body kinematics kolem nového CoM (linvel = V + ω × r, angvel = ω) a
- * vytvoří FixedJoint mezi candidate edge pair, který bude budoucí pohyb držet.
+ * **`not-align` mode (align=false)**: Spočítá nový aggregate state pro union compA ∪
+ * compB tak, aby se zachovaly ∑P a ∑L (KE klesne o relativní část — to je inelastic
+ * ztráta, ve fázi 4+ s pružnými spring jointy by se rozetřela do vibrace). Pak snap
+ * všech členů na rigid-body kinematics kolem nového CoM (linvel = V + ω × r, angvel
+ * = ω) a vytvoří FixedJoint mezi candidate edge pair.
  *
  *   M_new      = M_A + M_B
  *   CoM_new    = (M_A·CoM_A + M_B·CoM_B) / M_new
@@ -345,16 +368,29 @@ export function detectMergeCandidates(
  *   I_new      = Σ_X { I_X + M_X·|r_X|² }                       (parallel axis)
  *   ω_new      = L_total / I_new                                (∑L preserved)
  *
+ * **`align` mode (align=true)**: deleguje na `createFixedJoint(align=true)` Stage 3.1
+ * chain-merge cestu — rigid transform menšího řetězce do host frame + V_unified =
+ * ∑P/M + ω = 0 (angular momentum loss explicit, consistent s align destruktivním
+ * paradigm). Sdílí cestu s auto-joint na contact eventy → jednotná logika pro magnet
+ * i kontaktní spojení.
+ *
  * Skip pokud kterákoliv strana obsahuje pinned pixel — pinned je ∞ mass
  * conceptuálně a snap na rigid-body kinematics by ho rozhýbal. Vrací `true`,
  * pokud merge proběhl, `false` jinak.
  */
-export function applyMerge(world: World, candidate: MergeCandidate): boolean {
+export function applyMerge(world: World, candidate: MergeCandidate, align: boolean = false): boolean {
   const compA = candidate.compA;
   const compB = candidate.compB;
 
   for (const p of compA.members) if (p.pinned) return false;
   for (const p of compB.members) if (p.pinned) return false;
+
+  if (align) {
+    // Stage 3.1 chain-merge cesta — rigid transform + V_unified + recomputeCompositeOffsets.
+    // null = createFixedJoint odmítl (např. same-component, neměl by nastat z
+    // detectMergeCandidates, který páruje různé composity, ale guard pro jistotu).
+    return createFixedJoint(world, candidate.edgeA.pixel, candidate.edgeB.pixel, true) !== null;
+  }
 
   const M = compA.mass + compB.mass;
   if (M <= 0) return false;
@@ -403,58 +439,63 @@ export function applyMerge(world: World, candidate: MergeCandidate): boolean {
 }
 
 /**
- * Stage 3 MVP — composite-driven kinematics pro `align` mode.
+ * Stage 3 + 3.2 — composite-driven kinematics pro `align` mode s explicitním
+ * rotation handling.
  *
  * **Voláno PO `Rapier.step()`** — Rapier už integroval pos = pos_old + linvel·dt
- * (drift) a joint solver konvergoval (přibližně rigidní geometrie). Aggregate state
- * (CoM, V, ω) je rigid body invariant: ∑P/∑L preserved joint solverem (internal
- * impulses jsou Newton-3 reciprocal). Tato funkce override pos/rot/linvel/angvel
- * tak, aby geometrie byla **přesně** rigidní podle uložených offsetů — odstraňuje
- * solver imperfection drift, který v dlouhých simulacích narušuje slepenec.
+ * (drift), joint solver iteroval angular impulses (∑L preserved, ale individual
+ * pixel rotations mohou divergovat). `c.angvel` z aggregate state je rigid body
+ * invariant L_total / I_total. Tato funkce override pos/rot/linvel/angvel tak,
+ * aby geometrie byla **přesně** rigidní podle uložených offsetů.
  *
- *   pos_i  = CoM_aggregate + R(θ)·offset_i_local
- *   rot_i  = θ                (= members[0].rotation, joint solver synchronizoval)
- *   vel_i  = V_aggregate + ω_aggregate × r_i_world
- *   rs_i   = ω_aggregate
+ *   θ_new   = θ_old + c.angvel·dt   (manual drift composite rotation)
+ *   pos_i  = CoM + R(θ_new)·offset_i_local
+ *   rot_i  = θ_new
+ *   vel_i  = V + ω × r_world         (rigid body velocity rule)
+ *   rs_i   = c.angvel
  *
- * Offsets jsou stable (set v `createFixedJoint(align=true)` při změně topologie).
- * Geometrie zůstává invariant napříč ticky → žádný drift / overlap z imperfect
- * joint solveru.
+ * Stage 3.2 změna: θ je tracked přes `Pixel.compositeTheta` (sdíleno všemi
+ * členy), ne čteno z `members[0].body.rotation()`. Bez `lockRotations(true)` —
+ * Rapier joint solver volně iteruje individual pixel rotations (angular impulses
+ * po external collision atd.), my každý tick spočítáme aggregate ω přes
+ * computeAggregate, integrujeme θ manuálně, propagujeme do všech členů.
  *
- * Singleton composites (1 pixel) jsou skipnuty — Rapier je integruje normálně.
- * Pinned composites jsou skipnuty (∞ mass, override by ho rozhýbal).
+ * Důvod: před Stage 3.2 composite rotation fungovala "empiricky" — Rapier joint
+ * solver synchronizoval rotations přes anchory navzdory `lockRotations`, ale to
+ * byl side-effect, ne architectural property. Stage 3.2 dělá rotation handling
+ * **explicitní**: composite theta je naše authoritative state, Rapier rotation
+ * je read-only zdroj angvel pro aggregate, ne canonical pose.
  *
- * **Pozn.:** s `lockRotations(true)` v align mode (S11 default) θ se nemění
- * Rapier integrací, c.angvel je effectively 0 → composite jen translates (S11
- * behavior). Stage 3 přidaná hodnota: rigidní translace je teď enforced (žádný
- * inter-pixel drift), ne závislá na joint solver konvergenci.
+ * Offsets jsou stable (set v `recomputeCompositeOffsets` při změně topologie).
+ * Singleton composites (1 pixel) jsou skipnuty. Pinned composites taky.
  */
-export function stepCompositesAlign(world: World): void {
+export function stepCompositesAlign(world: World, dt: number): void {
   const composites = buildComposites(world);
   for (const c of composites) {
     if (c.members.length < 2) continue;
     if (c.members.some((p) => p.pinned)) continue;
 
-    const theta = c.members[0]!.body.rotation();
-    const cosT = Math.cos(theta);
-    const sinT = Math.sin(theta);
+    // Stage 3.2 manual θ drift. Před prvním tickem composite (po recompute)
+    // je `compositeTheta` set u všech členů; čteme z prvního, drift, propagujeme.
+    const theta_old = c.members[0]!.compositeTheta ?? 0;
+    const theta_new = theta_old + c.angvel * dt;
+    const cosT = Math.cos(theta_new);
+    const sinT = Math.sin(theta_new);
 
     for (const p of c.members) {
       const ox = p.compositeOffsetX ?? 0;
       const oy = p.compositeOffsetY ?? 0;
-      // World offset po rotaci o θ.
       const rxWorld = cosT * ox - sinT * oy;
       const ryWorld = sinT * ox + cosT * oy;
-      const px = c.com.x + rxWorld;
-      const py = c.com.y + ryWorld;
-      p.body.setTranslation({ x: px, y: py }, true);
-      p.body.setRotation(theta, true);
+      p.body.setTranslation({ x: c.com.x + rxWorld, y: c.com.y + ryWorld }, true);
+      p.body.setRotation(theta_new, true);
       // Linvel rigidního bodu na pozici r: V + ω × r (v 2D perp = (-ry, rx)·ω).
       p.body.setLinvel(
         { x: c.linvel.x - c.angvel * ryWorld, y: c.linvel.y + c.angvel * rxWorld },
         true,
       );
       p.body.setAngvel(c.angvel, true);
+      p.compositeTheta = theta_new;
     }
   }
 }

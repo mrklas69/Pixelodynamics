@@ -1,5 +1,32 @@
 # DONE
 
+## 2026-05-08 — Sezení 14: E14 validace odhalila 2 bugy + Stage 3.2 + magnet re-aktivace v align + hover slepenec + UI polish
+
+- **Bug fix #1 — autoJointAlign endpoint picking** v `src/sim/joints.ts`:
+  - Nový export `autoJointAlign(world, a, b)` jako wrapper kolem `createFixedJoint(align=true)`. Filtruje same-component eventy (chainA.includes(b) → return null) + vybírá endpoint pixely (degree ≤ 1 v rámci chain joint graphu) nejblíže ke kontaktnímu páru přes `pickClosestEndpoint`.
+  - Důvod: Rapier narrow-phase generuje contact eventy pro všechny AABB-overlapping páry (E14 Y offset 0.07 → a2-b0 i a1-b0 i a2-b1 ve stejném ticku). Po prvním cross-component merge byly další eventy "same component" → `createFixedJoint(align=true)` v původní same-component branchi vytvářel jointy s mismatched anchory (1U world distance) → solver iteroval proti existing chain anchorům → komposit vystřelí.
+  - Same-component branch v `createFixedJoint(align=true)` změněn na **early-return null** (return type rozšířen na `Joint | null`). Manual `connect()` z presetu se týká fresh pairs, takže null fallback je bezpečný.
+- **Bug fix #2 — connect propaguje align flag** v `src/ui/App.svelte`:
+  - `connect: (a, b) => createFixedJoint(w, a, b, integration === 'align')`. Bez toho chain joints v presetu se vytvářejí v not-align mode → `compositeOffsetX/Y` zůstává `null` → `stepCompositesAlign` v align mode čte `?? 0` → všichni 3 členové každého chainu kolabují na CoM během prvního ticku → komposit zhroutí, pak vystřelí přes broken anchory.
+- **Stage 3.2 — composite rotation explicit handling:**
+  - **`Pixel.compositeTheta: number | null`** field v `src/types.ts` — stable composite rotation, sdílena všemi members. Set v `recomputeCompositeOffsets`.
+  - **`stepCompositesAlign(world, dt)`** v `src/sim/composite.ts` — explicit theta drift: `θ_new = (members[0].compositeTheta ?? 0) + c.angvel·dt`; `setRotation(θ_new)` + propagace na všechny členy + update `compositeTheta = θ_new`.
+  - **`lockRotations(true)` zcela odstraněno** ze 4 míst (joints.ts fresh-fresh + chain+chain × 2, App.svelte $effect, App.svelte pointerDown spawn). Joint solver Rapieru volně iteruje individual pixel rotations, my každý tick override z aggregate state.
+  - **Empirie:** E14 modelshot identický s S3.1 (ω=0 → drift = 0). Drobný ω drift 1.2×10⁻⁵ rad/s je f32 numerical floor po odstranění lockRotations. Geometrie zůstává **přesně rigidní** (Y end pixelu konzistentní s `sin(θ)·offset`).
+- **Magnet merge re-aktivace v align mode:**
+  - **`applyMerge(world, candidate, align: boolean = false)`** v `composite.ts` — v align cestě deleguje na `createFixedJoint(..., true)` (Stage 3.1 chain-merge logika), v not-align cestě beze změny (Stage 2 ∑P + ∑L preserved math).
+  - **App.svelte gate** rozšířen na `not-align || align`. Auto-joint a magnet sdílí jednu cestu (Stage 3.1) v align mode → single source of truth pro merge geometry.
+  - **Validace:** E14 (align) modelshot identický (chains se setkají téměř současně přes magnet i auto-joint). E12/E13 (not-align) regression-safe.
+- **Hover infotipy nad slepencem:**
+  - **`computeCompositeFor(world, seed)`** v `composite.ts` — BFS od pixelu po jointech, vrací `Composite | null`. Singleton = null. O(členů + joints).
+  - **App.svelte hover state** rozšířen o `composite: { count, mass, comX/Y, vx/vy, speed, angvel } | null`. Tooltip přidá sekci "Slepenec (N×)" pokud composite ≠ null.
+- **2 UI polish:**
+  - PRESETS panel: odstraněn řádek "Mód: not-align · naive · e1" (redundance s mode select výše). Unused .hint CSS classes smazány.
+  - G100/G1024 presety: odstraněn forced `setIntegration('without-interaction')` — teď respektují aktuální mode (cluster gravita lepí v not-align).
+  - Info tooltip pro mode select: align popis přepsán na composite-driven kinematics (Stage 3+3.2), bez zmínky lockRotations.
+- **DROP β archiv** ze stale Příště (4 sezení S9 → S13 v Příště, ale β kód byl smazán už v S11; carry-over je zombie). Stejná logika jako S13 dropla "Spawn sound balance".
+- `npm run check`: 0 errors, 0 warnings.
+
 ## 2026-05-08 — Sezení 13: Stage 3.1 chain-merge rigid-transform + E14 + G100
 
 - **Stage 3.1 — `createFixedJoint(align=true)` 4-cestný rozcestník** v `src/sim/joints.ts`:

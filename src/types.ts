@@ -30,6 +30,15 @@ export type Pixel = {
    */
   compositeOffsetX: number | null;
   compositeOffsetY: number | null;
+  /**
+   * Stage 3.2 — composite rotation explicit handling. Stable composite-frame rotation
+   * sdílená všemi members composity (rigid body invariant). `stepCompositesAlign` ji
+   * každý tick driveuje manuálně: θ_new = θ_old + ω·dt; po updatu se zapíše na všechny
+   * členy + propaguje přes `setRotation`. Bez `lockRotations` — Rapier joint solver
+   * angular impulse modifikuje individual angvel, ale `c.angvel` v aggregate state
+   * spočítá rigid body ω, kterou unifikujeme. `null` pro singletony.
+   */
+  compositeTheta: number | null;
 };
 
 /** Stav kamery — pan a zoom v jednoduché 2D ortografické projekci. */

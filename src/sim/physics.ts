@@ -138,6 +138,7 @@ export class World {
       pinned,
       compositeOffsetX: null,
       compositeOffsetY: null,
+      compositeTheta: null,
     };
     this.pixels.push(pixel);
     this.pixelByCollider.set(collider.handle, pixel);
