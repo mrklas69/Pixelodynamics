@@ -6,22 +6,22 @@
 
 import type { mat3 } from 'gl-matrix';
 
-// Vertex shader pásuje `v_local` (místní quad souřadnice -0.5..0.5) do fragu
-// a per-instance ID porovná s aktuálně lockovaným ID (uniform) → flag pro highlight.
+// Vertex shader pásuje `v_local` (místní quad souřadnice -0.5..0.5) do fragu.
+// Per-instance `a_locked` (0/1) je flag pro highlight (CPU vyplní podle camera.lockTarget;
+// pro composite kind se nastaví na všech členů, ne jen rep pixel).
 const VERT_SRC = /* glsl */ `#version 300 es
 precision highp float;
 
 layout(location = 0) in vec2 a_local;          // base quad: -0.5..0.5
 layout(location = 1) in vec4 a_instance;       // (x, y, rotation, halfSize)
-layout(location = 2) in float a_id;            // pixel.id
+layout(location = 2) in float a_locked;        // 0/1 — je tento instance součástí lock targetu
 layout(location = 3) in float a_edgeMask;      // 4-bit mask, encoded as float 0..15
                                                // bit 0: +X edge, 1: -X, 2: +Y, 3: -Y
 
 uniform mat3 u_proj;
-uniform float u_lockedId;                      // -1 = žádný lock
 
 out vec2 v_local;
-out float v_locked;                            // 1.0 = tento instance je lock target
+out float v_locked;
 flat out int v_edgeMask;
 
 void main() {
@@ -33,17 +33,21 @@ void main() {
   vec3 clip = u_proj * vec3(world, 1.0);
   gl_Position = vec4(clip.xy, 0.0, 1.0);
   v_local = a_local;
-  // ID < 2^24 je v float32 reprezentováno přesně, takže porovnání je spolehlivé.
-  v_locked = (abs(a_id - u_lockedId) < 0.5) ? 1.0 : 0.0;
+  v_locked = a_locked;
   v_edgeMask = int(a_edgeMask + 0.5);
 }
 `;
 
-// Fragment vyplní jen pruh u kraje (vnitřek discard). Lockovaný pixel dostane
-// amber barvu shodující se s ikonou 🔒 v HUD (#d8b76f). Default = chladná modrobílá.
+// Fragment:
+//   - Vnitřek pixelu (`minDist > borderHalfWidth`): pro locked instance vyplň
+//     **plošně** semi-transparent amber (#d8b76f, alpha 0.20) — vizuální highlight,
+//     který nekoliduje s border barvami (bílá default / modrá joint). Neovlivnitelný
+//     pixel = discard, pozadí prosvítá.
+//   - Border: bílá default, modrá pro joint edge. Lock NEMĚNÍ border barvu (kdyby ano,
+//     amber border by zakryl modrou joint hranu — confusing).
 //
-// Edge mask: hrany sousedící s jointem se vykreslí stejnou modrou jako titulky panelů
-// (#6f8ec1) — vizuální koherence „strukturní spojení = panel header" místo varovné červené.
+// Edge mask: hrany sousedící s jointem se kreslí modrou shodující se s titulky panelů
+// (#6f8ec1) — vizuální koherence „strukturní spojení = panel header".
 const FRAG_SRC = /* glsl */ `#version 300 es
 precision highp float;
 
@@ -54,17 +58,24 @@ uniform float u_borderHalfWidth;
 out vec4 outColor;
 
 void main() {
-  // Vzdálenost k jednotlivým hranám (kladná = uvnitř quadu).
   float dPosX = 0.5 - v_local.x;
   float dNegX = 0.5 + v_local.x;
   float dPosY = 0.5 - v_local.y;
   float dNegY = 0.5 + v_local.y;
-
   float minDist = min(min(dPosX, dNegX), min(dPosY, dNegY));
-  if (minDist > u_borderHalfWidth) discard;
 
-  // Pokud je nejbližší hrana maskovaná, fragment dostane joint barvu.
-  // Pro corner fragmenty (2 edges == minDist) stačí, že jedna z nich je masked.
+  vec3 lockCol = vec3(0.847, 0.718, 0.435);    // #d8b76f (amber, sladěno s 🔒 v HUD)
+
+  // Vnitřek pixelu.
+  if (minDist > u_borderHalfWidth) {
+    if (v_locked > 0.5) {
+      outColor = vec4(lockCol, 0.20);  // plošný amber tint
+      return;
+    }
+    discard;
+  }
+
+  // Border. Pro corner fragmenty (2 edges == minDist) stačí jedna z nich masked → joint barva.
   bool jointEdge = false;
   if (dPosX <= minDist && (v_edgeMask & 1) != 0) jointEdge = true;
   if (dNegX <= minDist && (v_edgeMask & 2) != 0) jointEdge = true;
@@ -72,10 +83,8 @@ void main() {
   if (dNegY <= minDist && (v_edgeMask & 8) != 0) jointEdge = true;
 
   vec3 base = vec3(0.85, 0.92, 1.0);
-  vec3 lockCol = vec3(0.847, 0.718, 0.435);    // #d8b76f
   vec3 jointCol = vec3(0.435, 0.557, 0.757);   // #6f8ec1
-  vec3 col = mix(base, lockCol, v_locked);
-  if (jointEdge) col = jointCol;
+  vec3 col = jointEdge ? jointCol : base;
   outColor = vec4(col, 1.0);
 }
 `;
@@ -87,13 +96,12 @@ export class Renderer {
   instanceBuffer: WebGLBuffer;
   uProj: WebGLUniformLocation;
   uBorder: WebGLUniformLocation;
-  uLockedId: WebGLUniformLocation;
-  idBuffer: WebGLBuffer;
+  lockedBuffer: WebGLBuffer;
   maskBuffer: WebGLBuffer;
   capacity = 0;
   // CPU-side scratch buffery pro instance data — alokujeme jednou, pak jen přepisujeme.
   instanceData: Float32Array = new Float32Array(0); // per instance vec4 (x, y, rot, halfSize)
-  idData: Float32Array = new Float32Array(0); // per instance float (pixel.id)
+  lockedData: Float32Array = new Float32Array(0); // per instance float (0 = neutral, 1 = locked target)
   maskData: Float32Array = new Float32Array(0); // per instance float (4-bit edge mask, 0..15)
 
   constructor(canvas: HTMLCanvasElement) {
@@ -108,9 +116,6 @@ export class Renderer {
     const uBorder = gl.getUniformLocation(this.program, 'u_borderHalfWidth');
     if (!uBorder) throw new Error('Nelze najít u_borderHalfWidth uniform');
     this.uBorder = uBorder;
-    const uLockedId = gl.getUniformLocation(this.program, 'u_lockedId');
-    if (!uLockedId) throw new Error('Nelze najít u_lockedId uniform');
-    this.uLockedId = uLockedId;
 
     // Base quad: 4 vrcholy v rozsahu -0.5..0.5, triangle strip.
     const quad = new Float32Array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5]);
@@ -135,11 +140,11 @@ export class Renderer {
     gl.vertexAttribPointer(1, 4, gl.FLOAT, false, 0, 0);
     gl.vertexAttribDivisor(1, 1);
 
-    // ID buffer — samostatný kvůli per-instance-divisoru a stride 1 floatu.
-    const idbo = gl.createBuffer();
-    if (!idbo) throw new Error('Nelze vytvořit id buffer');
-    this.idBuffer = idbo;
-    gl.bindBuffer(gl.ARRAY_BUFFER, idbo);
+    // Locked-flag buffer — 0/1 per instance, CPU vyplní z camera.lockTarget každý frame.
+    const lbo = gl.createBuffer();
+    if (!lbo) throw new Error('Nelze vytvořit locked buffer');
+    this.lockedBuffer = lbo;
+    gl.bindBuffer(gl.ARRAY_BUFFER, lbo);
     gl.enableVertexAttribArray(2);
     gl.vertexAttribPointer(2, 1, gl.FLOAT, false, 0, 0);
     gl.vertexAttribDivisor(2, 1);
@@ -155,7 +160,7 @@ export class Renderer {
 
     gl.bindVertexArray(null);
     gl.clearColor(0.05, 0.06, 0.09, 1.0);
-    // Alpha blending pro semi-transparent edge mask (joint fade na 50%).
+    // Alpha blending pro semi-transparent locked interior fill + edge mask.
     // Standardní src-over: outColor.rgb·src.a + background·(1-src.a).
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
@@ -169,13 +174,13 @@ export class Renderer {
     while (cap < n) cap *= 2;
     this.capacity = cap;
     this.instanceData = new Float32Array(cap * 4);
-    this.idData = new Float32Array(cap);
+    this.lockedData = new Float32Array(cap);
     this.maskData = new Float32Array(cap);
     const gl = this.gl;
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.instanceData.byteLength, gl.DYNAMIC_DRAW);
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.idBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, this.idData.byteLength, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lockedBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, this.lockedData.byteLength, gl.DYNAMIC_DRAW);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.maskBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, this.maskData.byteLength, gl.DYNAMIC_DRAW);
   }
@@ -192,10 +197,11 @@ export class Renderer {
    * to znamená přímo šířku v U; volající typicky předává max(0.05, 1/cam.zoom)
    * pro hybrid „minimálně 1 px obrazovky, ale ne tlustší než 5 % strany".
    *
-   * `lockedId` = id pixelu, který se má zvýraznit barvou (sladěno s ikonou 🔒 v HUD).
-   * Předej `-1` pokud žádný lock.
+   * Lock highlight je řízen per-instance `lockedData[i]` — caller musí vyplnit
+   * 0/1 podle příslušnosti pixelu k aktuálnímu lock targetu (pixel kind = 1 jen
+   * pro target; composite kind = 1 pro všechny členy).
    */
-  render(count: number, proj: mat3, borderHalfWidth: number, lockedId: number): void {
+  render(count: number, proj: mat3, borderHalfWidth: number): void {
     const gl = this.gl;
     gl.clear(gl.COLOR_BUFFER_BIT);
     if (count === 0) return;
@@ -203,13 +209,12 @@ export class Renderer {
     gl.useProgram(this.program);
     gl.uniformMatrix3fv(this.uProj, false, proj);
     gl.uniform1f(this.uBorder, borderHalfWidth);
-    gl.uniform1f(this.uLockedId, lockedId);
 
     // Upload instance data (jen ten prefix, který se reálně používá).
     gl.bindBuffer(gl.ARRAY_BUFFER, this.instanceBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.instanceData.subarray(0, count * 4));
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.idBuffer);
-    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.idData.subarray(0, count));
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.lockedBuffer);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.lockedData.subarray(0, count));
     gl.bindBuffer(gl.ARRAY_BUFFER, this.maskBuffer);
     gl.bufferSubData(gl.ARRAY_BUFFER, 0, this.maskData.subarray(0, count));
 

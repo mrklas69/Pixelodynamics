@@ -82,85 +82,9 @@ export function computeDiagnostics(world: World): Diagnostics {
 }
 
 /** Stats spočítaný z grafu pixely-jointy v jediném Union-Find průchodu. */
-export type ObjectStats = {
-  /** Počet komponent souvislosti (= počet objektů). */
-  count: number;
-  /** Reprezentant největší komponenty + počet pixelů. null pro prázdnou scénu. */
-  largest: { repId: number; size: number } | null;
-};
-
 /** Lookup `pixel → index` — sdílený mezi diagnostics a render edge mask (App.svelte). */
 export function buildPixelIndex(world: World): Map<Pixel, number> {
   const idxOf = new Map<Pixel, number>();
   for (let i = 0; i < world.pixels.length; i++) idxOf.set(world.pixels[i]!, i);
   return idxOf;
-}
-
-/**
- * Statistika objektů (pixely jako vrcholy, jointy jako hrany) v jednom Union-Find
- * průchodu s path compression a union by size — O((N+J)·α).
- *
- * Vrací: počet komponent + reprezentanta největší (pro `Largest` champion).
- *
- * Volá se á 500 ms v display ticku, takže perf je bez přetížení i pro N=1000, J=500.
- * Pro statickou topologii (žádné nové jointy) bychom mohli kachovat, ale auto-jointing
- * v hybrid-α znamená, že topologie se mění organicky → vždy přepočítat.
- */
-export function computeObjectStats(world: World): ObjectStats {
-  const n = world.pixels.length;
-  if (n === 0) return { count: 0, largest: null };
-  const idxOf = buildPixelIndex(world);
-
-  const parent = new Int32Array(n);
-  const size = new Int32Array(n);
-  for (let i = 0; i < n; i++) {
-    parent[i] = i;
-    size[i] = 1;
-  }
-
-  const find = (x: number): number => {
-    let r = x;
-    while (parent[r]! !== r) r = parent[r]!;
-    // Path compression
-    while (parent[x]! !== r) {
-      const next = parent[x]!;
-      parent[x] = r;
-      x = next;
-    }
-    return r;
-  };
-
-  let components = n;
-  for (const j of world.joints) {
-    const a = idxOf.get(j.a);
-    const b = idxOf.get(j.b);
-    if (a === undefined || b === undefined) continue;
-    const ra = find(a);
-    const rb = find(b);
-    if (ra === rb) continue;
-    // Union by size — drobná konstanta, ale stačí pro O((N+J)·α).
-    if (size[ra]! < size[rb]!) {
-      parent[ra] = rb;
-      size[rb] = size[rb]! + size[ra]!;
-    } else {
-      parent[rb] = ra;
-      size[ra] = size[ra]! + size[rb]!;
-    }
-    components--;
-  }
-
-  // Najdi root s největší size. Procházíme jen roots (parent[i] === i).
-  let bestRoot = 0;
-  let bestSize = size[0]!;
-  for (let i = 1; i < n; i++) {
-    if (parent[i] !== i) continue;
-    if (size[i]! > bestSize) {
-      bestRoot = i;
-      bestSize = size[i]!;
-    }
-  }
-  return {
-    count: components,
-    largest: { repId: world.pixels[bestRoot]!.id, size: bestSize },
-  };
 }

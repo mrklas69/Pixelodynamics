@@ -4,7 +4,7 @@ import { mat3 } from 'gl-matrix';
 import type { Camera } from '../types';
 
 export function createCamera(): Camera {
-  return { x: 0, y: 0, zoom: 32, lockTargetId: null }; // default: 1 U = 32 px, free
+  return { x: 0, y: 0, zoom: 32, lockTarget: null }; // default: 1 U = 32 px, free
 }
 
 /**

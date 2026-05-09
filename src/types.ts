@@ -41,6 +41,23 @@ export type Pixel = {
   compositeTheta: number | null;
 };
 
+/**
+ * Lock target = entita, kterou kamera každý frame následuje.
+ *
+ * - `pixel` — follow přesně na `pixel.pos`. `id` = `Pixel.id`.
+ * - `composite` — follow na CoM slepence. `id` = **min(member.id)** = stable composite ID
+ *   (sezení 16). Lze ho použít k re-lookupu komponenty kdykoliv (BFS od pixelu s tím
+ *   ID najde všechny členy). Pokud min member zmizí (Fáze 5+ break), composite ID se
+ *   změní → lock se shodí (přesně jak chceme — composite reprezentovaný tím repem už
+ *   není).
+ *
+ * Shoz: WASD pan, Esc, nebo když rep pixel zmizí.
+ */
+export type LockTarget =
+  | { kind: 'pixel'; id: number }
+  | { kind: 'composite'; id: number }
+  | null;
+
 /** Stav kamery — pan a zoom v jednoduché 2D ortografické projekci. */
 export type Camera = {
   // Posun kamery ve world unitech (kde je střed obrazovky).
@@ -48,7 +65,6 @@ export type Camera = {
   y: number;
   // Zoom = kolik pixelů obrazovky odpovídá 1 U.
   zoom: number;
-  // Pokud není null, kamera každý frame následuje pixel s tímto ID (lock follow).
-  // Shazuje se: WASD pan, Esc, nebo když pixel zmizí ze světa.
-  lockTargetId: number | null;
+  // Lock follow target — pixel nebo composite. null = free kamera.
+  lockTarget: LockTarget;
 };

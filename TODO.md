@@ -36,6 +36,9 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo.
 - [x] **E12** — pair-to-pair collision empirický test (sezení 15). Modelshot 2 chainy m=2 head-on po 3.02 s: 4 pixely všechny v klidu, distance 1.0 U mezi sousedy, ∑P=0, ∑L=0, KE=0 (100% inelastic head-on). ∑P/∑L preserved.
 - [x] **E15** — align rotation test (sezení 15). Synthetic injection ω=+1 na chain m=3 po assembly v align (connect zničí ω paradigmaticky → ruční restore přes Pixel.body). Po 10 s: distance(p0,p1)=distance(p1,p2)=1.000 U přesně, compositeTheta sdíleně všemi members (r=-2.5733 ≡ θ=-2.566 + 7e-3 integration error). ω drift -0.14 %/10 s (systematic dissipace, ne ulp), KE drift -0.28 %/10 s konzistentní (KE = ½·I·ω²). Stage 3.2 explicit theta authoritative ✓.
 - [x] **E14 modelshot validace** — sezení 14. První modelshot odhalil 2 critical bugy v S13 Stage 3.1; po fixech (autoJointAlign endpoint picking + connect propaguje align flag) modelshot ✓ 6-pixel chain (-2.5..+2.5), CoM≈(0,0), ∑P=10⁻⁷, ω=10⁻⁵, KE=10⁻¹⁵.
+- [x] **Pohlcení pixelu fix** — sezení 16. Occupied-edge filter v `createFixedJoint(align=true)` chain větvi: 4 kandidáti PX/NX/PY/NY sortováni podle dxL/dyL projekce, vyhraj first kde host i guest opposite dir jsou volné. Bez tohoto filtru padl rigid-transform target na pozici existujícího chain souseda (#1145 sedící na #1139's pos v G100 modelshotu).
+- [x] **Snake-growth fix (full free-edge enumeration)** — sezení 16. `findBestJointPair` enumeruje všechny volné hrany všech pixelů obou chainů (ne jen endpoint), vyhrává pár s nejnižším skóre `|hostMid − bPos| + |guestMid − aPos|`. Refactor: extrahováno `joinAlignedExplicit` (sdílený rigid-transform + joint create + offsets), `pickClosestEndpoint` smazán. Chainy teď rostou do **2D shape** (T-jointy, čtverce, větvení) místo jen po jedné ose.
+- [x] **Secondary joint detection** — sezení 16. Po primary jointu v `joinAlignedExplicit` projet merged komponenty na edge-touching páry (Δpos ≈ ±1 v dominant local axis, oba dirs free), vytvořit secondary jointy. `Joint.kind: 'primary' | 'secondary'`. Bez tohoto by 2 paralelní chainy m=3 narazené bokem skončily s jediným primary jointem; teď vznikne plný 2×3 grid se 7 jointy.
 
 ## Fáze 4 — hmotnost a pružnost
 
@@ -60,7 +63,11 @@ Markery: `[ ]` čeká · `[~]` rozděláno · `[x]` hotovo.
 - [x] Patička (centrovaná, dvouřádková, název aplikace + licence + repo)
 - [x] Pixely jako rámečky (hybrid border max(0.05U, 1px), připraveno pro vis. spojů)
 - [x] Hover infotipy nad pixely (id, x, y, vx, vy, r, rs, m, |v|)
-- [x] Largest (Most-pixels-in-object) — sezení 11. `computeObjectStats` v diagnostics rozšířen o size tracking; FACTS panel řádek "Largest" napojen.
+- [x] Largest (Most-pixels-in-object) — sezení 11. `computeObjectStats` v diagnostics rozšířen o size tracking; FACTS panel řádek "Largest" napojen. Sezení 16: refactor — `computeObjectStats` smazán jako mrtvý kód, FACTS iteruje `composites` přímo z `buildComposites`.
+- [x] **FACTS pro slepence (composite ID + ChampionEntity)** — sezení 16. `ChampionEntity = {kind: 'pixel'\|'composite', id}` discriminated union. Composite ID = min(member.id), stable across ticks. `computeFacts(composites, cmx, cmy)` iteruje composites; singleton (1 člen) → 'pixel', jinak 'composite'. Largest a Most massive teď v G100/G1024 vyhrávají skoro vždy slepenec.
+- [x] **Lock kamery na slepence (CoM follow)** — sezení 16. `Camera.lockTarget: LockTarget` discriminated union místo `lockTargetId: number`. Pixel kind → follow `pixel.pos`; composite kind → re-find pixel by id, BFS přes `computeCompositeFor`, follow `composite.com`. Pokud rep zmizel nebo se composite rozpadl → unlock + toast.
+- [x] **Plošný amber lock highlight** — sezení 16. Per-instance `a_locked` attribute místo `u_lockedId` uniform. Shader fill `vec4(amber, 0.20)` ve vnitřku locked pixelu, border zachová bílou/modrou (žádná kolize s joint barvou). Pro composite lock se zvýrazní **všichni členové**, ne jen rep.
+- [x] **HUD lock label** — sezení 16. `🔒 #ID` pro pixel, `🔒 ◆#ID` pro composite. FACTS button textem rovněž rozliší prefix `◆`.
 - [x] Connections counter — sezení 8 (manuální), sezení 10 (auto-joint reaguje)
 - [x] Objects counter — sezení 10. `computeObjectCount(world)` přes Union-Find s path compression a union by size. O((N+J)·α). Wire-up v display ticku + reset.
 - [x] Total energy E = KE + PE — sezení 6: ∑E + Δ∑E v STATS panelu, E₀ se zachytí při prvním display ticku po prvním sim kroku (PE platná). KE rozšířena o rotační složku ½·I·ω² (I=m/6).

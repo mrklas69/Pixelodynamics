@@ -57,6 +57,18 @@ Pro current fáze (krátké experimenty < 30 s) zanedbatelné. Pro Fáze 6+ long
 
 Cena: dvě authoritative state (θ + ω) místo jednoho. Compute order: θ_new = θ_old + ω_old·dt; ω se mění **jen** v event-driven cestách. Trade-off: čistší konzervace vs. komplexnější update path. Nech na později, až bude trigger (long-run scénář, kde drift bolí).
 
+### Snake-growth fix → DONE (sezení 16)
+
+S14 `pickClosestEndpoint` (degree ≤ 1 filter) způsoboval, že chainy rostly **jen po jedné ose**: pixel z boku interního pixelu chainu skončil přilepený na vzdálený endpoint, ne na bok kontaktního pixelu. S16 nahrazen `findBestJointPair` — full enumeration všech volných hran všech pixelů obou chainů, vyhraj pár s nejnižším skóre `|hostMid − bPos| + |guestMid − aPos|` s constraintem `guestDir = opposite(hostDir)`.
+
+Doplněno: po primary jointu **secondary detection** — projet páry merged komponenty na edge-touching (Δpos ≈ ±1 v dominant local axis, oba dirs free), vytvořit `kind: 'secondary'` jointy. Bez tohoto by 2 paralelní chainy m=3 narazené bokem skončily s 1 jointem; teď vznikne plný 2×3 grid se 7 jointy.
+
+**Constraint paralelní chainů**: rotace o Δθ = θ_host − θ_guest zarovnává guest local frame s host's. T-jointy s chainem rotated 90° vůči hostu jsou mimo scope (potřebovaly by extra Δθ ± π/2). Otevřeno pro Fázi 4+ pokud user trigger.
+
+### Magnet timing v align mode → DROP (sezení 16)
+
+S14/S15 Příště „magnet trigger v align suspect" — magnet check běží na display ticku (5 Hz), auto-joint na sim ticku (60 Hz), magnet block je v App.svelte loopu **po** všech sim tickech v rámci frame. Pro fast-closing scenarios (E14 closing 1 U/s, magnet okno 0.1 s, display perioda 0.5 s) magnet typicky nestihne před auto-jointem. Pro slow scenarios (E12 closing 0.1 U/s, okno 1 s) vždy stihne. **Není to bug v `freeEdges` pro rotated chain** (S14 hypotéza), je to frame-rate coupling. V S16 magnet `applyMerge(align=true)` deleguje na stejnou cestu jako auto-joint (`joinAlignedExplicit`), takže outcome je identický → testovatelné jen instrumentací. DROP.
+
 ### Hard cutoff isolation (sezení 11 → IDEAS)
 
 Pixel mimo `cutoff = ε · cutoffFactor` od všech sousedů zamrzne (force=0 přesně, žádné "weak attraction"). Není to bug, ale model UX překvapení (uživatel intuitivně čeká `1/r²` všude, ale grid je culling decision).

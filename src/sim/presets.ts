@@ -22,13 +22,14 @@ import type { Pixel } from '../types';
  *                            Slepence zachovají rotace pixelů a věrně pruží/kmitají;
  *                            anchor = midpoint mezi centry (může být off-edge pro
  *                            natočené pixely, ale physics dynamics konzistentní).
- *   - `align`                Jako `not-align`, ale při auto-jointu **destruktivně**
- *                            snapne pos newer pixelu (vyšší id) na axis-aligned 1 U
- *                            distance + snap r=0, rs=0, lockRotations(true). Vznikne
- *                            vždy axis-aligned mřížka. Jednorázová intervence při
- *                            create (žádný per-tick reset, který by ničil joint
- *                            warm-start). Cena: ztráta rotace; pair distance vždy
- *                            přesně 1 U, ale collision dynamics zničena.
+ *                            Magnet merge (Stage 2) zachovává ∑P + ∑L explicit math.
+ *   - `align`                Composite-driven kinematics (Stage 3 + 3.2). Při auto-jointu
+ *                            nebo magnet mergi rigid-transformuje menší řetězec do host
+ *                            local frame (∑P preserved, ω = 0 explicit). `compositeTheta`
+ *                            sdílen members slepence; `stepCompositesAlign` per-tick
+ *                            override pos/rot/linvel/angvel z aggregate state. Sezení 16:
+ *                            full free-edge enumeration (snake-growth fix) + secondary
+ *                            joint detection po každém primary jointu (2D shape rust).
  */
 export type IntegrationMode = 'without-interaction' | 'not-align' | 'align';
 
@@ -94,103 +95,6 @@ function gridSpawn(api: PresetAPI, cols: number, rows: number, spacing: number):
 }
 
 export const PRESETS: Preset[] = [
-  {
-    id: 'e1',
-    name: 'E1 — Pair attract (no rotation)',
-    description:
-      '2 pixely v (-2, 0) a (+2, 0), klid (vx=vy=rs=0), G=1, mode `not-align`. ' +
-      'Stop @ 10 s. Očekávání: gravita přitáhne, kontakt → auto-joint, finální fixní ' +
-      'obdélník v origin, pair distance ≈ 1 U (oba r=0 při kontaktu). ∑P=0, ∑L=0.',
-    setup: (api) => {
-      api.setIntegration('not-align');
-      api.setG(1);
-      api.setUseGrid(false);
-      api.spawn(-2, 0, 0, 0, 0, 0, 1, false);
-      api.spawn(+2, 0, 0, 0, 0, 0, 1, false);
-    },
-    stopAtTime: 10,
-  },
-  {
-    id: 'e2',
-    name: 'E2 — Pair attract (opposite spin)',
-    description:
-      'Jako E1 ale rs=+1 vlevo, rs=-1 vpravo. ∑L_init=0 (cancel). Po slepení joint sync ' +
-      'rotaci páru → pair angvel = 0 (conservation). Pair distance > 1 U typically — pixely ' +
-      'jsou rotated v okamžik kontaktu, anchor padne na midpoint v rotated geometrii. ' +
-      'VĚRNÁ FYZIKA, ne bug: collision moment je determined by initial rotation. ' +
-      'Pro identický 1 U pair viz E2align.',
-    setup: (api) => {
-      api.setIntegration('not-align');
-      api.setG(1);
-      api.setUseGrid(false);
-      api.spawn(-2, 0, 0, 0, 0, +1, 1, false);
-      api.spawn(+2, 0, 0, 0, 0, -1, 1, false);
-    },
-    stopAtTime: 10,
-  },
-  {
-    id: 'e1align',
-    name: 'E1 align — Pair attract (no rotation, snap)',
-    description:
-      'Jako E1 ale mode `align`. Při auto-jointu pos snap newer pixelu na 1 U distance ' +
-      '+ edge-to-edge anchor + lockRotations. Pair distance přesně 1 U deterministicky. ' +
-      'Pro E1 (no rotation) by mělo být identické s not-align variantou.',
-    setup: (api) => {
-      api.setIntegration('align');
-      api.setG(1);
-      api.setUseGrid(false);
-      api.spawn(-2, 0, 0, 0, 0, 0, 1, false);
-      api.spawn(+2, 0, 0, 0, 0, 0, 1, false);
-    },
-    stopAtTime: 10,
-  },
-  {
-    id: 'e2align',
-    name: 'E2 align — Pair attract (opposite spin, snap)',
-    description:
-      'Jako E2 ale mode `align`. Pixely rotují (rs=±1) během letu, ale při auto-joint align ' +
-      'destruktivně snapne pos + r=0 → fixní obdélník 1 U distance, pair r=0. Rozdíl proti ' +
-      'E2 not-align (pair distance ~1.3 U, pair r ≈ 2.5 rad) ukazuje cenu align: ztráta ' +
-      'rotation memory + collision physics, výměnou za axis-aligned grid.',
-    setup: (api) => {
-      api.setIntegration('align');
-      api.setG(1);
-      api.setUseGrid(false);
-      api.spawn(-2, 0, 0, 0, 0, +1, 1, false);
-      api.spawn(+2, 0, 0, 0, 0, -1, 1, false);
-    },
-    stopAtTime: 10,
-  },
-  {
-    id: 'e3',
-    name: 'E3 — Rotating bar + spinning pixel',
-    description:
-      '4pixelová tyčka v (-3..0, 0) jako rigid body s ω=+1 rad/s (per-pixel vy = ω·Δx_rel ' +
-      'kolem CoM v -1.5). Vpravo 1 pixel v (5, 0) v klidu, ω=-1 rad/s. Mode `not-align`, ' +
-      'G=1, stop @ 10 s.\n' +
-      'Initial: ∑P=0 (sym), ∑L=5.5 (orbital 5 + spin 0.5). ' +
-      'Očekávání: gravita přitáhne pravý pixel k tyčce, kontakt → auto-joint, ∑P a ∑L ' +
-      'zachovány do f32 šumu (joint preserve relative orientation).',
-    setup: (api) => {
-      api.setIntegration('not-align');
-      api.setG(1);
-      api.setUseGrid(false);
-      const omega = 1;
-      // Tyčka: 4 pixely v (-3, 0)..(0, 0), CoM v (-1.5, 0).
-      // Rigid rotation: linvel pixelu = ω × r_rel = (0, ω·Δx, 0). vx=0 (Δy=0).
-      const cmx = -1.5;
-      const p0 = api.spawn(-3, 0, 0, omega * (-3 - cmx), 0, omega, 1, false);
-      const p1 = api.spawn(-2, 0, 0, omega * (-2 - cmx), 0, omega, 1, false);
-      const p2 = api.spawn(-1, 0, 0, omega * (-1 - cmx), 0, omega, 1, false);
-      const p3 = api.spawn(0, 0, 0, omega * (0 - cmx), 0, omega, 1, false);
-      api.connect(p0, p1);
-      api.connect(p1, p2);
-      api.connect(p2, p3);
-      // Pravý pixel — opposite spin.
-      api.spawn(5, 0, 0, 0, 0, -omega, 1, false);
-    },
-    stopAtTime: 10,
-  },
   {
     id: 'e12',
     name: 'E12 — Magnet merge head-on (m=2 vs m=2)',

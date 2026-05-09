@@ -2,8 +2,8 @@
   import { onMount } from 'svelte';
   import { World } from '../sim/physics';
   import { stepGravity, stepGravityKickOnly } from '../sim/gravity';
-  import { computeDiagnostics, computeCentroid, computeObjectStats, buildPixelIndex } from '../sim/diagnostics';
-  import { computeFacts, emptyFacts, type Facts, type Champion } from '../sim/facts';
+  import { computeDiagnostics, computeCentroid, buildPixelIndex } from '../sim/diagnostics';
+  import { computeFacts, emptyFacts, type Facts, type Champion, type ChampionEntity } from '../sim/facts';
   import { GRAVITY_EPSILON, GRAVITY_SUBSTEPS, GRAVITY_USE_GRID, GRAVITY_CUTOFF_FACTOR, AUTO_JOINT_ON_CONTACT, MAGNET_THRESHOLD } from '../sim/params';
   import { PRESETS, buildModelshot, type IntegrationMode, type Preset } from '../sim/presets';
   import { createFixedJoint, autoJointAlign } from '../sim/joints';
@@ -17,7 +17,7 @@
   import { playSpawn } from '../audio/sfx';
   import { Renderer } from '../render/gl';
   import { createCamera, projection, screenToWorld, worldToScreen } from '../render/camera';
-  import type { Camera, Pixel } from '../types';
+  import type { Camera, Pixel, LockTarget } from '../types';
   import { Keyboard } from '../input/keyboard';
   import { fmtSig4 } from './format';
 
@@ -116,23 +116,25 @@
   }
 
   /**
-   * Zámek kamery na pixel s daným ID. Loop ho každý frame následuje.
-   * Pokud ID neexistuje, jen toast — nesnažíme se setknout neviditelné.
+   * Zámek kamery na entitu (pixel nebo slepenec). Loop ji každý frame následuje:
+   * pixel → `pixel.pos`, composite → CoM přes `computeCompositeFor` z rep pixelu.
+   * Pokud rep ID neexistuje, jen toast.
    */
-  function lockCameraOn(id: number): void {
+  function lockCameraOn(target: ChampionEntity): void {
     if (!world) return;
-    const exists = world.pixels.some((p) => p.id === id);
+    const exists = world.pixels.some((p) => p.id === target.id);
     if (!exists) {
-      showToast(`Pixel #${id} už neexistuje`);
+      showToast(`#${target.id} už neexistuje`);
       return;
     }
-    camera.lockTargetId = id;
-    showToast(`🔒 Lock #${id} (Esc / WASD odemkne)`, 1500);
+    camera.lockTarget = { kind: target.kind, id: target.id };
+    const prefix = target.kind === 'composite' ? '◆' : '';
+    showToast(`🔒 Lock ${prefix}#${target.id} (Esc / WASD odemkne)`, 1500);
   }
 
   function unlockCamera(): void {
-    if (camera.lockTargetId !== null) {
-      camera.lockTargetId = null;
+    if (camera.lockTarget !== null) {
+      camera.lockTarget = null;
     }
   }
 
@@ -449,7 +451,7 @@
           e.preventDefault();
           paused = !paused;
         } else if (e.code === 'Escape' && !e.repeat) {
-          if (camera.lockTargetId !== null) {
+          if (camera.lockTarget !== null) {
             unlockCamera();
             showToast('🔓 Kamera odemčena', 1200);
           }
@@ -470,7 +472,7 @@
         if (keyboard.isDown('KeyS')) { camera.y -= panSpeed * realDt * camera.zoom; panned = true; }
         if (keyboard.isDown('KeyA')) { camera.x -= panSpeed * realDt * camera.zoom; panned = true; }
         if (keyboard.isDown('KeyD')) { camera.x += panSpeed * realDt * camera.zoom; panned = true; }
-        if (panned && camera.lockTargetId !== null) unlockCamera();
+        if (panned && camera.lockTarget !== null) unlockCamera();
         if (keyboard.isDown('KeyY')) camera.zoom = Math.min(200, camera.zoom * (1 + realDt));
         if (keyboard.isDown('KeyX')) camera.zoom = Math.max(2, camera.zoom / (1 + realDt));
 
@@ -537,18 +539,30 @@
           accumulator = 0;
         }
 
-        // Lock follow — po simulačním kroku (pixel je v aktuální pozici).
-        // Pokud pixel zmizel ze světa (např. po resetScene), zámek shoď a poreferuj.
-        if (camera.lockTargetId !== null) {
-          const lockId = camera.lockTargetId;
-          const target = w.pixels.find((p) => p.id === lockId);
-          if (target) {
-            const t = target.body.translation();
+        // Lock follow — po simulačním kroku.
+        // - `pixel` kind: kamera = pixel.pos.
+        // - `composite` kind: re-find pixel s lockTarget.id, BFS přes computeCompositeFor,
+        //   kamera = composite.com. Pokud rep zmizel nebo už není ve slepenci (singleton),
+        //   shoď zámek (composite, který rep reprezentoval, už neexistuje).
+        if (camera.lockTarget !== null) {
+          const lock = camera.lockTarget;
+          const repPixel = w.pixels.find((p) => p.id === lock.id);
+          if (!repPixel) {
+            unlockCamera();
+            showToast(`#${lock.id} zmizel — kamera odemčena`, 1500);
+          } else if (lock.kind === 'pixel') {
+            const t = repPixel.body.translation();
             camera.x = t.x;
             camera.y = t.y;
           } else {
-            unlockCamera();
-            showToast(`Pixel #${lockId} zmizel — kamera odemčena`, 1500);
+            const c = computeCompositeFor(w, repPixel);
+            if (!c) {
+              unlockCamera();
+              showToast(`Slepenec ◆#${lock.id} se rozpadl — kamera odemčena`, 1500);
+            } else {
+              camera.x = c.com.x;
+              camera.y = c.com.y;
+            }
           }
         }
 
@@ -556,10 +570,29 @@
         const c = computeCentroid(w);
         centroidScreen = c ? worldToScreen(camera, viewport, c.cx, c.cy) : null;
 
+        // Lock highlight set — pro pixel kind jen rep, pro composite kind všichni členové.
+        // Per-frame O(N) lookup; pro N<10000 zanedbatelné.
+        const lockedIds = new Set<number>();
+        if (camera.lockTarget !== null) {
+          if (camera.lockTarget.kind === 'pixel') {
+            lockedIds.add(camera.lockTarget.id);
+          } else {
+            const repPixel = w.pixels.find((p) => p.id === camera.lockTarget!.id);
+            if (repPixel) {
+              const c = computeCompositeFor(w, repPixel);
+              if (c) {
+                for (const m of c.members) lockedIds.add(m.id);
+              } else {
+                lockedIds.add(repPixel.id);
+              }
+            }
+          }
+        }
+
         // Render.
         renderer.reserve(w.pixels.length);
         const data = renderer.instanceData;
-        const idData = renderer.idData;
+        const lockedData = renderer.lockedData;
         const maskData = renderer.maskData;
         for (let i = 0; i < w.pixels.length; i++) {
           const p = w.pixels[i]!;
@@ -568,7 +601,7 @@
           data[i * 4 + 1] = t.y;
           data[i * 4 + 2] = p.body.rotation();
           data[i * 4 + 3] = 0.5;
-          idData[i] = p.id;
+          lockedData[i] = lockedIds.has(p.id) ? 1 : 0;
           maskData[i] = 0;
         }
         // Edge mask z jointů: pro každý joint určíme dominantní lokální osu anchoru
@@ -585,12 +618,7 @@
         }
         // Hybrid border: nejméně 1 screen px, nejvýše 5 % strany pixelu.
         const borderHalfWidth = Math.max(0.05, 1 / camera.zoom);
-        renderer.render(
-          w.pixels.length,
-          projection(camera, viewport),
-          borderHalfWidth,
-          camera.lockTargetId ?? -1,
-        );
+        renderer.render(w.pixels.length, projection(camera, viewport), borderHalfWidth);
 
         frames++;
         fpsAccum += realDt;
@@ -604,14 +632,13 @@
         if (displayAccum > 0.5) {
           displayAccum = 0;
           connectionCount = w.joints.length;
-          const stats = computeObjectStats(w);
-          objectCount = stats.count;
           // Magnetic merge: detection (Stage 1) + apply (Stage 2/3.1). Per display tick (5 Hz).
           // Volné hrany komponent v dosahu MAGNET_THRESHOLD jsou kandidáty na inelastic merge.
           // `without-interaction` skip — Rapier step se nevolá → FixedJoint by visel bez efektu.
           // `not-align` jede Stage 2 math (∑P + ∑L preserved). `align` jede Stage 3.1
           // chain-merge cestu přes createFixedJoint (∑P preserved, ω=0 explicit).
           const composites = buildComposites(w);
+          objectCount = composites.length;
           const candidates = detectMergeCandidates(w, composites, MAGNET_THRESHOLD);
           mergeCandidateCount = candidates.length;
           if (integration === 'not-align' || integration === 'align') {
@@ -642,7 +669,7 @@
           }
           sumE = e;
           deltaE = e0 === null ? 0 : e - e0;
-          facts = computeFacts(w, d.cx, d.cy, stats.largest);
+          facts = computeFacts(composites, d.cx, d.cy);
         }
 
         requestAnimationFrame(loop);
@@ -727,8 +754,12 @@
         {/if}
       </div>
       <div class="hud-row">
-        {#if camera.lockTargetId !== null}
-          <span class="lock">🔒 #{camera.lockTargetId}</span>
+        {#if camera.lockTarget !== null}
+          {#if camera.lockTarget.kind === 'composite'}
+            <span class="lock">🔒 ◆#{camera.lockTarget.id}</span>
+          {:else}
+            <span class="lock">🔒 #{camera.lockTarget.id}</span>
+          {/if}
         {:else}
           <span class="free">free</span>
         {/if}
@@ -855,8 +886,12 @@
 
 {#snippet champ(c: Champion)}
   {#if c}
-    <button class="id-link" onclick={() => lockCameraOn(c.id)} title={`Hodnota: ${fmtSig4(c.value)} — klik = lock kamery`}>
-      #{c.id}
+    <button
+      class="id-link"
+      onclick={() => lockCameraOn(c.entity)}
+      title={`Hodnota: ${fmtSig4(c.value)} — klik = lock kamery`}
+    >
+      {c.entity.kind === 'composite' ? '◆' : ''}#{c.entity.id}
     </button>
   {:else}
     —

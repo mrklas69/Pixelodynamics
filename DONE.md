@@ -1,5 +1,26 @@
 # DONE
 
+## 2026-05-09 — Sezení 16: Pohlcení pixelu + snake-growth + secondary joints + FACTS pro slepence + amber plošný highlight
+
+- **Pohlcení pixelu fix** v `src/sim/joints.ts`: dominant-axis větev `createFixedJoint(align=true)` doplněna o `occupiedDirs` filter — host i guest pixel hostí kandidáty (PX/NX/PY/NY) sortované podle skóre, vyhraj first kde host occupied dir není nastaven a guest opposite dir není nastaven. Endpoint má max 1 occupied dir → vždy ≥ 2 volné páry. Zafixovalo overlap, kdy guest přiletěl ke endpoint hosta z chain-extension strany a target padl na pozici existujícího chain souseda.
+- **Snake-growth fix** přes `findBestJointPair(world, chainA, chainB, aPos, bPos)` v `joints.ts` — full O(|chainA|·|chainB|·16) enumerace všech volných hran všech pixelů obou chainů; vyhrává pár s nejnižším skóre `|hostMid − bPos| + |guestMid − aPos|`, s constraintem `guestDir = opposite(hostDir)`.
+- **Refactor `joinAlignedExplicit(world, hostPx, hostDir, guestPx, guestDir)`** — extrakce sdíleného rigid-transform + velocity unification + joint create + `recomputeCompositeOffsets` + `detectSecondaryJoints`. `autoJointAlign` deleguje (po `findBestJointPair`); manual `connect()` z presetu zachová dominant-axis heuristiku s occupied filterem (S16 fix), pak deleguje. `pickClosestEndpoint` smazán.
+- **Secondary joint detection** přes `detectSecondaryJoints(world, seedPx)` — po primary jointu projet všechny páry pixelů merged komponenty, najít edge-touching (Δpos v p1 local frame má dominant složku ≈ ±1 s tolerancí 0.05 U, oba dirs free), vytvořit jointy s `kind: 'secondary'`. Bez `playClick`, bez rigid-transform. `Joint.kind: 'primary' | 'secondary'` field v Joint type.
+- **FACTS pro slepence** v `src/sim/facts.ts`:
+  - `ChampionEntity = {kind: 'pixel'|'composite', id}` discriminated union. Singleton composite (1 member) → `kind: 'pixel'`, jinak `'composite'`. ID = min(member.id), stable across ticks.
+  - `computeFacts(composites, cmx, cmy)` iteruje composites; metriky: speed, spin, mom, L sum over members kolem world centroidu, size, mass.
+- **`computeObjectStats` mrtvý kód odstraněn** z `diagnostics.ts` — nahrazeno `composites.length` a iterací přes composites.
+- **`LockTarget` discriminated union** v `types.ts`. `Camera.lockTargetId` → `lockTarget`. App.svelte follow logic: pixel kind → `pixel.pos`, composite kind → re-find pixel by id, BFS přes `computeCompositeFor`, follow `composite.com`. Pokud rep zmizel → unlock + toast.
+- **HUD lock label** rozliší `🔒 #ID` (pixel) vs `🔒 ◆#ID` (composite). FACTS champ snippet: `#ID` vs `◆#ID` v button textu.
+- **Plošný amber lock highlight** v `src/render/gl.ts`:
+  - Per-instance `a_locked` attribute (Float32 0/1, location 2) místo `u_lockedId` uniform + `a_id`. CPU per frame vyplní `lockedData[i]` z `camera.lockTarget` (composite kind = 1 pro všechny members přes `computeCompositeFor`).
+  - Shader interior: pokud `v_locked > 0.5`, fill `vec4(amber, 0.20)`; jinak discard. Border zachová bílou default / modrou joint, lock NEMĚNÍ border.
+  - `Renderer.render(count, proj, borderHalfWidth)` API drop `lockedId` parametr. `idBuffer` + `idData` smazány.
+- **Cleanup obsoleted Exx presetů** v `src/sim/presets.ts` — odstraněny E1, E2, E1align, E2align, E3 (předchází Stage 3.1, redundantní s E12-E15 nebo s outdated descriptions zmiňující odstraněné `lockRotations`/destruktivní snap). Zbývá E12, E13, E14, E15, G100, G1024.
+- **IntegrationMode docstring** updated — `align` přepsáno z „lockRotations + destruktivní snap" na „composite-driven kinematics Stage 3+3.2 + full free-edge enumeration (snake-growth fix S16) + secondary joint detection".
+- `npm run check`: 0 errors, 0 warnings.
+- Uživatel ověřil E12, E13, E14, E15 OK po snake-growth refactoru.
+
 ## 2026-05-08 — Sezení 15: E12 carry-over PASS + E15 align rotation test (synthetic ω injection)
 
 - **E12 modelshot PASS** (carry-over ze S10): 2 chainy m=2 head-on, magnet merge, simTime 3.02 s. 4 pixely v klidu na linii spacing 1.0 U, ∑P=0, ∑L=0, KE=0 (100 % inelastic head-on loss). TODO `[ ]` → `[x]`.
